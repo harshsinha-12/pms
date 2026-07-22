@@ -21,6 +21,7 @@ import {
   House,
   Info,
   MagnifyingGlass,
+  PencilSimple,
   Plus,
   Receipt,
   SlidersHorizontal,
@@ -166,6 +167,7 @@ function normalizeHolding(raw, index = 0) {
 
   return {
     id: String(firstDefined(raw.latest_transaction_id, raw.id, raw.holding_id, raw.transaction_id, symbol, index)),
+    latestTransactionId: raw.latest_transaction_id ? String(raw.latest_transaction_id) : null,
     symbol,
     name: firstDefined(raw.name, raw.long_name, raw.company_name, symbol, "Unknown asset"),
     market,
@@ -186,6 +188,40 @@ function normalizeHolding(raw, index = 0) {
     tradedAt: firstDefined(raw.tradedAt, raw.latest_traded_at, raw.traded_at, null),
     color: firstDefined(raw.color, ["#b89252", "#b91f2e", "#5b63de", "#11130f"][index % 4]),
   };
+}
+
+function normalizeTransactionForEdit(raw) {
+  return {
+    id: String(firstDefined(raw.id, raw.transaction_id, "")),
+    symbol: String(firstDefined(raw.symbol, raw.ticker, "")).toUpperCase(),
+    side: String(firstDefined(raw.side, raw.type, raw.transaction_type, "BUY")).toUpperCase(),
+    quantity: Number(firstDefined(raw.quantity, raw.units, 0)),
+    price: Number(firstDefined(raw.price, raw.average_price, raw.averagePrice, 0)),
+    tradedAt: firstDefined(raw.traded_at, raw.transaction_date, raw.date, raw.created_at),
+    createdAt: firstDefined(raw.created_at, raw.traded_at, raw.transaction_date, raw.date),
+    currency: firstDefined(raw.currency, "INR"),
+    name: firstDefined(raw.name, raw.company_name, ""),
+    assetType: firstDefined(raw.asset_type, raw.assetType, "STOCK"),
+  };
+}
+
+function latestTransactionForHolding(rows, holding) {
+  const candidates = rows
+    .map(normalizeTransactionForEdit)
+    .filter((transaction) => transaction.id && transaction.symbol === holding.symbol)
+    .sort((left, right) => {
+      const tradedDifference = new Date(right.tradedAt || 0) - new Date(left.tradedAt || 0);
+      if (tradedDifference) return tradedDifference;
+      return new Date(right.createdAt || 0) - new Date(left.createdAt || 0);
+    });
+
+  if (!holding.latestTransactionId) return null;
+  return candidates.find((transaction) => transaction.id === holding.latestTransactionId) ?? null;
+}
+
+function transactionInputDate(value) {
+  const match = String(value || "").match(/^\d{4}-\d{2}-\d{2}/);
+  return match?.[0] || new Date().toISOString().slice(0, 10);
 }
 
 function normalizeSummary(raw = {}) {
@@ -605,6 +641,7 @@ function HoldingsTable({
   compact = false,
   onQueryChange,
   onBuy,
+  onEdit,
   onSell,
   onShowAll,
 }) {
@@ -716,6 +753,9 @@ function HoldingsTable({
                       </button>
                       {menuOpen === holding.id ? (
                         <div className="action-menu">
+                          <button type="button" onClick={() => { setMenuOpen(null); onEdit(holding); }}>
+                            <PencilSimple size={16} /> Edit latest transaction
+                          </button>
                           <button type="button" onClick={() => { setMenuOpen(null); onBuy(holding); }}>
                             <ArrowDownRight size={16} /> Buy more
                           </button>
@@ -771,6 +811,7 @@ function HoldingsView({
   usdInrStatus,
   onQueryChange,
   onBuy,
+  onEdit,
   onSell,
 }) {
   const unrealizedClass = summary.unrealizedGain < 0
@@ -811,6 +852,7 @@ function HoldingsView({
         usdInrStatus={usdInrStatus}
         onQueryChange={onQueryChange}
         onBuy={onBuy}
+        onEdit={onEdit}
         onSell={onSell}
       />
     </div>
@@ -937,6 +979,38 @@ function DrawerShell({ title, subtitle, onClose, children, width = "standard" })
   );
 }
 
+function TransactionDrawerState({ holding, loading, error, onRetry, onClose }) {
+  return (
+    <DrawerShell
+      title="Edit latest transaction"
+      subtitle={loading
+        ? `Loading the transaction that currently drives ${holding.symbol}.`
+        : `The saved transaction linked to ${holding.symbol} could not be loaded.`}
+      onClose={onClose}
+    >
+      <div className="drawer-state">
+        {loading ? (
+          <>
+            <SpinnerGap className="spin" size={27} />
+            <strong>Loading latest transaction…</strong>
+            <p>Fetching the exact saved record before making it editable.</p>
+          </>
+        ) : (
+          <>
+            <Info size={27} />
+            <strong>Couldn’t open this transaction</strong>
+            <p role="alert">{error}</p>
+            <div className="drawer-state-actions">
+              <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+              <button className="primary-button" type="button" onClick={onRetry}>Try again</button>
+            </div>
+          </>
+        )}
+      </div>
+    </DrawerShell>
+  );
+}
+
 function normalizeSearchResult(item) {
   const symbol = firstDefined(item.symbol, item.ticker, "");
   const currency = firstDefined(
@@ -966,35 +1040,45 @@ function TransactionDrawer({
   holding,
   holdings,
   initialSide,
+  editTransaction = null,
   usdInrRate,
   usdInrStatus,
   onClose,
   onSave,
 }) {
-  const [side, setSide] = useState(initialSide);
+  const isEdit = Boolean(editTransaction);
+  const [side, setSide] = useState(editTransaction?.side || initialSide);
   const [selectedSymbol, setSelectedSymbol] = useState(holding ? normalizeSearchResult({ ...holding, price: holding.currentPrice }) : null);
-  const [searchOpen, setSearchOpen] = useState(!holding);
+  const [searchOpen, setSearchOpen] = useState(!isEdit && !holding);
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
-    symbol: holding?.symbol ?? "",
-    name: holding?.name ?? "",
+    symbol: editTransaction?.symbol ?? holding?.symbol ?? "",
+    name: editTransaction?.name || holding?.name || "",
     market: holding?.market ?? "NSE",
     assetClass: holding?.assetClass ?? "Indian Stocks",
-    currency: holding?.currency ?? "INR",
-    quantity: "",
-    averagePrice: holding?.currentPrice ?? "",
+    assetType: editTransaction?.assetType || holding?.assetType || "STOCK",
+    currency: editTransaction?.currency ?? holding?.currency ?? "INR",
+    quantity: editTransaction?.quantity ?? "",
+    averagePrice: editTransaction?.price ?? holding?.currentPrice ?? "",
     currentPrice: holding?.currentPrice ?? "",
-    date: new Date().toISOString().slice(0, 10),
+    date: editTransaction ? transactionInputDate(editTransaction.tradedAt) : new Date().toISOString().slice(0, 10),
   });
   const searchRef = useRef(null);
   const heldPosition = holdings.find((item) => item.symbol === form.symbol);
-  const availableQuantity = side === "SELL" ? Number(heldPosition?.quantity || 0) : null;
+  const availableQuantity = side === "SELL"
+    ? Number(heldPosition?.quantity || 0) + (isEdit ? Number(editTransaction?.quantity || 0) : 0)
+    : null;
   const exceedsAvailable = side === "SELL"
     && Number(form.quantity || 0) > availableQuantity;
 
   useEffect(() => {
+    if (isEdit) {
+      setResults([]);
+      setSearching(false);
+      return undefined;
+    }
     const query = form.symbol.trim();
     if (!searchOpen) {
       setResults([]);
@@ -1042,10 +1126,10 @@ function TransactionDrawer({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [form.symbol, holdings, searchOpen, side]);
+  }, [form.symbol, holdings, isEdit, searchOpen, side]);
 
   function changeSide(nextSide) {
-    if (nextSide === side) return;
+    if (isEdit || nextSide === side) return;
     setSide(nextSide);
     setSearchOpen(true);
     if (nextSide === "SELL" && !holdings.some((item) => item.symbol === form.symbol)) {
@@ -1084,22 +1168,27 @@ function TransactionDrawer({
     event.preventDefault();
     if (!form.symbol || !form.quantity || !form.averagePrice || exceedsAvailable) return;
     setSaving(true);
-    await onSave({
-      ...form,
-      side,
-      quantity: Number(form.quantity),
-      averagePrice: Number(form.averagePrice),
-      currentPrice: Number(form.currentPrice || form.averagePrice),
-    });
-    setSaving(false);
+    try {
+      await onSave({
+        ...form,
+        side,
+        quantity: Number(form.quantity),
+        averagePrice: Number(form.averagePrice),
+        currentPrice: Number(form.currentPrice || form.averagePrice),
+      });
+    } finally {
+      setSaving(false);
+    }
   }
 
   const transactionValue = Number(form.quantity || 0) * Number(form.averagePrice || 0);
   const sideLabel = side === "BUY" ? "Buy" : "Sell";
-  const drawerTitle = `${sideLabel} an investment`;
-  const drawerSubtitle = side === "BUY"
-    ? "Search Yahoo Finance and record a dated purchase."
-    : "Choose an open position and record the units sold.";
+  const drawerTitle = isEdit ? "Edit latest transaction" : `${sideLabel} an investment`;
+  const drawerSubtitle = isEdit
+    ? `Update the latest ${sideLabel.toLowerCase()} for ${form.symbol}. The position will be recalculated after saving.`
+    : side === "BUY"
+      ? "Search Yahoo Finance and record a dated purchase."
+      : "Choose an open position and record the units sold.";
   const canSubmit = Boolean(form.symbol && form.quantity && form.averagePrice) && !exceedsAvailable;
 
   return (
@@ -1109,44 +1198,56 @@ function TransactionDrawer({
       onClose={onClose}
     >
       <form className="holding-form" onSubmit={handleSubmit}>
-        <div className="transaction-side-control" role="group" aria-label="Transaction side">
-          <button
-            className={side === "BUY" ? "is-selected" : ""}
-            type="button"
-            onClick={() => changeSide("BUY")}
-            aria-pressed={side === "BUY"}
-          >
-            <ArrowDownRight size={17} /> Buy
-          </button>
-          <button
-            className={side === "SELL" ? "is-selected sell-side" : ""}
-            type="button"
-            onClick={() => changeSide("SELL")}
-            aria-pressed={side === "SELL"}
-          >
-            <ArrowUpRight size={17} /> Sell
-          </button>
-        </div>
+        {isEdit ? (
+          <div className={cx("transaction-edit-context", side === "SELL" && "is-sell")}>
+            {side === "BUY" ? <ArrowDownRight size={18} /> : <ArrowUpRight size={18} />}
+            <span>
+              <small>Transaction type</small>
+              <strong>{sideLabel} · symbol and type are locked</strong>
+            </span>
+          </div>
+        ) : (
+          <div className="transaction-side-control" role="group" aria-label="Transaction side">
+            <button
+              className={side === "BUY" ? "is-selected" : ""}
+              type="button"
+              onClick={() => changeSide("BUY")}
+              aria-pressed={side === "BUY"}
+            >
+              <ArrowDownRight size={17} /> Buy
+            </button>
+            <button
+              className={side === "SELL" ? "is-selected sell-side" : ""}
+              type="button"
+              onClick={() => changeSide("SELL")}
+              aria-pressed={side === "SELL"}
+            >
+              <ArrowUpRight size={17} /> Sell
+            </button>
+          </div>
+        )}
         <div className="field-group symbol-field" ref={searchRef}>
-          <label htmlFor="symbol-search">{side === "BUY" ? "Symbol or company" : "Holding to sell"}</label>
+          <label htmlFor="symbol-search">{isEdit ? "Holding" : side === "BUY" ? "Symbol or company" : "Holding to sell"}</label>
           <div className="field-with-icon">
             <MagnifyingGlass size={19} />
             <input
               id="symbol-search"
               value={form.symbol}
-              onFocus={() => setSearchOpen(true)}
+              onFocus={() => { if (!isEdit) setSearchOpen(true); }}
               onChange={(event) => {
+                if (isEdit) return;
                 setSelectedSymbol(null);
                 setSearchOpen(true);
                 setForm((current) => ({ ...current, symbol: event.target.value.toUpperCase(), name: "" }));
               }}
               placeholder={side === "BUY" ? "Try RELIANCE.NS or AAPL" : "Search your open positions"}
               autoComplete="off"
+              readOnly={isEdit}
               required
             />
             {searching ? <SpinnerGap className="spin field-spinner" size={18} /> : null}
           </div>
-          {searchOpen && results.length ? (
+          {!isEdit && searchOpen && results.length ? (
             <div className="symbol-results">
               {results.slice(0, 5).map((item) => (
                 <button type="button" key={item.symbol} onClick={() => chooseSymbol(item)}>
@@ -1167,7 +1268,7 @@ function TransactionDrawer({
               ))}
             </div>
           ) : null}
-          {searchOpen && side === "SELL" && results.length === 0 ? (
+          {!isEdit && searchOpen && side === "SELL" && results.length === 0 ? (
             <div className="sell-search-empty">
               {holdings.length === 0 ? "There are no open positions to sell." : "No held symbol matches this search."}
             </div>
@@ -1186,7 +1287,7 @@ function TransactionDrawer({
             <div>
               <small>Latest close</small>
               <strong>{formatMoney(form.currentPrice, form.currency, 2)}</strong>
-              {side === "SELL" ? <small>{availableQuantity.toLocaleString("en-IN")} units available</small> : null}
+              {side === "SELL" ? <small>{availableQuantity.toLocaleString("en-IN")} units available for this sale</small> : null}
             </div>
           </div>
         ) : null}
@@ -1209,8 +1310,10 @@ function TransactionDrawer({
             {side === "SELL" ? (
               <small id="available-quantity" className={cx("field-hint", exceedsAvailable && "field-error")}>
                 {exceedsAvailable
-                  ? `Only ${availableQuantity.toLocaleString("en-IN")} units are available.`
-                  : `${availableQuantity.toLocaleString("en-IN")} units available to sell.`}
+                  ? `Only ${availableQuantity.toLocaleString("en-IN")} units are available for this transaction.`
+                  : isEdit
+                    ? `${availableQuantity.toLocaleString("en-IN")} units available after rolling back this sale.`
+                    : `${availableQuantity.toLocaleString("en-IN")} units available to sell.`}
               </small>
             ) : null}
           </div>
@@ -1272,7 +1375,7 @@ function TransactionDrawer({
           <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
           <button className={cx("primary-button", side === "SELL" && "sell-button")} type="submit" disabled={saving || !canSubmit}>
             {saving ? <SpinnerGap className="spin" size={18} /> : <Check size={18} weight="bold" />}
-            {saving ? "Saving…" : `${sideLabel} ${form.symbol || "investment"}`}
+            {saving ? "Saving…" : isEdit ? "Save changes" : `${sideLabel} ${form.symbol || "investment"}`}
           </button>
         </div>
       </form>
@@ -1375,6 +1478,7 @@ export function App() {
   const [drawer, setDrawer] = useState(null);
   const [transactionContext, setTransactionContext] = useState(null);
   const [toast, setToast] = useState(null);
+  const editLoadRequest = useRef(0);
 
   const showToast = useCallback((message, kind = "success") => {
     setToast({ id: Date.now(), message, kind });
@@ -1415,7 +1519,13 @@ export function App() {
   useEffect(() => {
     if (!drawer) return undefined;
     function closeOnEscape(event) {
-      if (event.key === "Escape") setDrawer(null);
+      if (event.key === "Escape") {
+        setDrawer(null);
+        if (drawer === "transaction") {
+          editLoadRequest.current += 1;
+          setTransactionContext(null);
+        }
+      }
     }
     document.body.classList.add("drawer-open");
     window.addEventListener("keydown", closeOnEscape);
@@ -1488,8 +1598,54 @@ export function App() {
   }
 
   function openTransactionDrawer(side = "BUY", holding = null) {
-    setTransactionContext({ side, holding });
+    editLoadRequest.current += 1;
+    setTransactionContext({ mode: "create", side, holding });
     setDrawer("transaction");
+  }
+
+  function closeTransactionDrawer() {
+    editLoadRequest.current += 1;
+    setDrawer(null);
+    setTransactionContext(null);
+  }
+
+  async function openEditHolding(holding) {
+    const requestId = editLoadRequest.current + 1;
+    editLoadRequest.current = requestId;
+    setTransactionContext({ mode: "edit", holding, loading: true, error: null, transaction: null });
+    setDrawer("transaction");
+
+    try {
+      if (!holding.latestTransactionId) {
+        throw new Error("This holding does not include a latest transaction ID, so it cannot be edited safely.");
+      }
+      const response = await portfolioApi.getTransactions(undefined, holding.symbol);
+      const rows = response?.transactions ?? response?.data ?? response;
+      const transaction = Array.isArray(rows)
+        ? latestTransactionForHolding(rows, holding)
+        : null;
+      if (!transaction) {
+        throw new Error("The latest saved transaction for this holding could not be found. Refresh the portfolio and try again.");
+      }
+      if (editLoadRequest.current !== requestId) return;
+      setTransactionContext({
+        mode: "edit",
+        holding,
+        loading: false,
+        error: null,
+        side: transaction.side,
+        transaction,
+      });
+    } catch (error) {
+      if (editLoadRequest.current !== requestId) return;
+      setTransactionContext({
+        mode: "edit",
+        holding,
+        loading: false,
+        error: error?.message || "The latest transaction could not be loaded.",
+        transaction: null,
+      });
+    }
   }
 
   async function saveTransaction(form) {
@@ -1510,10 +1666,26 @@ export function App() {
       showToast(
         `${form.side === "BUY" ? "Bought" : "Sold"} ${form.quantity.toLocaleString("en-IN")} ${form.symbol}.`,
       );
-      setDrawer(null);
-      setTransactionContext(null);
+      closeTransactionDrawer();
     } catch (error) {
       showToast(error?.message || "The transaction could not be saved. Your portfolio is unchanged.", "warning");
+    }
+  }
+
+  async function saveEditedTransaction(transactionId, form) {
+    const payload = {
+      quantity: form.quantity,
+      price: form.averagePrice,
+      traded_at: `${form.date}T12:00:00+05:30`,
+    };
+
+    try {
+      await portfolioApi.updateTransaction(transactionId, payload);
+      await reloadPortfolio();
+      showToast(`Updated the latest ${form.side.toLowerCase()} for ${form.symbol}.`);
+      closeTransactionDrawer();
+    } catch (error) {
+      showToast(error?.message || "The transaction could not be updated. Your portfolio is unchanged.", "warning");
     }
   }
 
@@ -1557,6 +1729,7 @@ export function App() {
                 compact
                 onQueryChange={setQuery}
                 onBuy={(holding) => openTransactionDrawer("BUY", holding)}
+                onEdit={openEditHolding}
                 onSell={(holding) => openTransactionDrawer("SELL", holding)}
                 onShowAll={() => setActiveView("holdings")}
               />
@@ -1572,22 +1745,36 @@ export function App() {
             usdInrStatus={usdInrStatus}
             onQueryChange={setQuery}
             onBuy={(holding) => openTransactionDrawer("BUY", holding)}
+            onEdit={openEditHolding}
             onSell={(holding) => openTransactionDrawer("SELL", holding)}
           />
         )}
       </main>
 
       {drawer === "transaction" && transactionContext ? (
-        <TransactionDrawer
-          key={`${transactionContext.side}-${transactionContext.holding?.symbol || "new"}`}
-          holding={transactionContext.holding}
-          holdings={holdings}
-          initialSide={transactionContext.side}
-          usdInrRate={usdInrRate}
-          usdInrStatus={usdInrStatus}
-          onClose={() => { setDrawer(null); setTransactionContext(null); }}
-          onSave={saveTransaction}
-        />
+        transactionContext.mode === "edit" && !transactionContext.transaction ? (
+          <TransactionDrawerState
+            holding={transactionContext.holding}
+            loading={transactionContext.loading}
+            error={transactionContext.error}
+            onRetry={() => openEditHolding(transactionContext.holding)}
+            onClose={closeTransactionDrawer}
+          />
+        ) : (
+          <TransactionDrawer
+            key={`${transactionContext.mode}-${transactionContext.transaction?.id || transactionContext.side}-${transactionContext.holding?.symbol || "new"}`}
+            holding={transactionContext.holding}
+            holdings={holdings}
+            initialSide={transactionContext.side}
+            editTransaction={transactionContext.transaction}
+            usdInrRate={usdInrRate}
+            usdInrStatus={usdInrStatus}
+            onClose={closeTransactionDrawer}
+            onSave={transactionContext.mode === "edit"
+              ? (form) => saveEditedTransaction(transactionContext.transaction.id, form)
+              : saveTransaction}
+          />
+        )
       ) : null}
       {drawer === "transactions" ? (
         <TransactionsDrawer transactions={transactions} onClose={() => setDrawer(null)} />

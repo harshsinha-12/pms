@@ -753,7 +753,7 @@ tbody tr:hover {
   top: 31px;
   right: 0;
   display: grid;
-  width: 136px;
+  width: 188px;
   padding: 5px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -1167,6 +1167,75 @@ tbody tr:hover {
 .transaction-side-control button.is-selected.sell-side {
   border-color: #e4d5d1;
   color: #8d3f37;
+}
+
+.transaction-edit-context {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  margin-bottom: 23px;
+  padding: 9px 12px;
+  gap: 10px;
+  border: 1px solid #d5ddd3;
+  border-radius: 8px;
+  background: #edf2ea;
+  color: var(--green-dark);
+}
+
+.transaction-edit-context.is-sell {
+  border-color: #e1d5d1;
+  background: #f4ece9;
+  color: #8d3f37;
+}
+
+.transaction-edit-context span {
+  display: grid;
+  gap: 2px;
+}
+
+.transaction-edit-context small {
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.transaction-edit-context strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.drawer-state {
+  display: grid;
+  flex: 1;
+  align-content: center;
+  justify-items: center;
+  padding: 42px 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.drawer-state > svg {
+  margin-bottom: 14px;
+  color: var(--green);
+}
+
+.drawer-state > strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.drawer-state > p {
+  max-width: 310px;
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.drawer-state-actions {
+  display: flex;
+  margin-top: 24px;
+  gap: 9px;
 }
 
 .field-group {

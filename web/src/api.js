@@ -36,8 +36,9 @@ export const portfolioApi = {
     return request("/portfolio", { signal });
   },
 
-  getTransactions(signal) {
-    return request("/transactions", { signal });
+  getTransactions(signal, symbol) {
+    const query = symbol ? `?symbol=${encodeURIComponent(symbol)}` : "";
+    return request(`/transactions${query}`, { signal });
   },
 
   refresh() {
