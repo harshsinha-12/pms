@@ -783,7 +783,7 @@ function HoldingsView({
         <div>
           <p className="eyebrow">Position book</p>
           <h2 id="positions-heading">All open positions</h2>
-          <p>Review exposure, buy more, sell units, or correct the latest transaction.</p>
+          <p>Review exposure, buy more, or sell units from one clean position book.</p>
         </div>
         <dl className="holdings-stats">
           <div>

@@ -132,6 +132,31 @@ uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
 Add the API, Redis, portfolio, and market-data values from the local environment as Railway service variables. Do not add Redis credentials to the Vercel frontend project. After deployment, generate a Railway public domain and verify `/api/health` before connecting the frontend.
 
+## Vercel frontend deployment
+
+Create the Vercel project from this repository with these settings:
+
+- **Root Directory:** `web`
+- **Framework Preset:** Vite
+- **Build Command:** `npm run build`
+- **Output Directory:** `dist/client`
+
+In Vercel **Settings → Environment Variables**, add the Railway public origin for Production and Preview:
+
+```env
+RAILWAY_API_ORIGIN=https://your-api.up.railway.app
+```
+
+Use only the HTTPS origin: no `/api` suffix, path, or trailing slash. `web/vercel.mjs` preserves the frontend's existing same-origin `/api/*` requests and proxies them to `${RAILWAY_API_ORIGIN}/api/*` on Railway.
+
+After Vercel creates the production deployment, copy its stable URL from **Settings → Domains**. In the Railway API service's **Variables** tab, set:
+
+```env
+API_CORS_ORIGINS=https://your-project.vercel.app
+```
+
+Multiple allowed frontend origins can be comma-separated without quotes. Use origins only, with no path or trailing slash. Redeploy Railway after changing the variable, then redeploy Vercel so the rewrite configuration and environment variable are active.
+
 For production, serve the generated frontend assets from `web/dist`, run FastAPI behind a production ASGI process, route `/api/*` to it, restrict CORS to the deployed frontend origin, use TLS, and keep Redis inaccessible from the public internet. This project is designed as a personal portfolio tracker; add authentication and per-user data isolation before exposing it to other users.
 
 ## How performance is interpreted
