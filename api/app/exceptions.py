@@ -13,3 +13,6 @@ class InvalidTransactionError(PortfolioError):
 class MarketDataError(PortfolioError):
     pass
 
+
+class PortfolioBusyError(PortfolioError):
+    pass

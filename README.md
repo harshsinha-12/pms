@@ -122,6 +122,16 @@ make check
 
 The compiled frontend assets are written beneath `web/dist`.
 
+## Railway backend deployment
+
+Create the Railway service from this repository and set its **Root Directory** to `/api`. Railpack then reads `api/railpack.json`, installs the Python dependencies from `api/requirements.txt`, and starts FastAPI with:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+Add the API, Redis, portfolio, and market-data values from the local environment as Railway service variables. Do not add Redis credentials to the Vercel frontend project. After deployment, generate a Railway public domain and verify `/api/health` before connecting the frontend.
+
 For production, serve the generated frontend assets from `web/dist`, run FastAPI behind a production ASGI process, route `/api/*` to it, restrict CORS to the deployed frontend origin, use TLS, and keep Redis inaccessible from the public internet. This project is designed as a personal portfolio tracker; add authentication and per-user data isolation before exposing it to other users.
 
 ## How performance is interpreted

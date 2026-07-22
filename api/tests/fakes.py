@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import asyncio
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
@@ -24,6 +27,7 @@ class FakeRepository:
         self.fx_rate: FxRate | None = None
         self.snapshots: dict[str, PortfolioSnapshot] = {}
         self.connected = False
+        self._ledger_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self.connected = True
@@ -33,6 +37,11 @@ class FakeRepository:
 
     async def ping(self) -> bool:
         return self.connected
+
+    @asynccontextmanager
+    async def transaction_lock(self) -> AsyncIterator[None]:
+        async with self._ledger_lock:
+            yield
 
     async def list_transactions(self) -> list[Transaction]:
         return deepcopy(list(self.transactions.values()))
@@ -103,6 +112,7 @@ class FakeProvider:
         }
         self.fx = FxRate(rate=Decimal("83"), as_of=now)
         self.fail_quotes = False
+        self.fail_fx = False
         self.quote_calls: list[list[str]] = []
 
     async def search(self, query: str, limit: int = 10) -> list[Instrument]:
@@ -134,6 +144,8 @@ class FakeProvider:
         return {symbol: deepcopy(self.quotes[symbol]) for symbol in symbols if symbol in self.quotes}
 
     async def get_usd_inr(self) -> FxRate:
+        if self.fail_fx:
+            raise MarketDataError("simulated FX outage")
         return deepcopy(self.fx)
 
     async def get_daily_history(

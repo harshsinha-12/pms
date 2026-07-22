@@ -8,7 +8,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import Settings, get_settings
-from .exceptions import InvalidTransactionError, MarketDataError, NotFoundError
+from .exceptions import (
+    InvalidTransactionError,
+    MarketDataError,
+    NotFoundError,
+    PortfolioBusyError,
+)
 from .models import (
     HealthResponse,
     Instrument,
@@ -75,6 +80,14 @@ def create_app(
     @app.exception_handler(MarketDataError)
     async def market_data_handler(_, exc: MarketDataError) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    @app.exception_handler(PortfolioBusyError)
+    async def portfolio_busy_handler(_, exc: PortfolioBusyError) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": str(exc)},
+            headers={"Retry-After": "1"},
+        )
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     @app.get("/api/health", response_model=HealthResponse, tags=["system"])

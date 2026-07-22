@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import re
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.exceptions import LockError
 
 from ..config import Settings
+from ..exceptions import PortfolioBusyError
 from ..models import FxRate, PortfolioSnapshot, Quote, Transaction
 
 
@@ -54,6 +58,28 @@ class RedisPortfolioRepository:
 
     async def ping(self) -> bool:
         return bool(await self._client.ping())
+
+    @asynccontextmanager
+    async def transaction_lock(self) -> AsyncIterator[None]:
+        """Serialize ledger validation and persistence across API workers."""
+
+        lock = self._client.lock(
+            f"{self._prefix}:locks:transactions",
+            timeout=180,
+            blocking_timeout=10,
+        )
+        acquired = await lock.acquire()
+        if not acquired:
+            raise PortfolioBusyError("portfolio is busy; retry the transaction")
+        try:
+            yield
+        finally:
+            try:
+                await lock.release()
+            except LockError:
+                # If the lease was lost, Redis already prevents us from releasing
+                # another worker's lock. The durable ledger write remains valid.
+                pass
 
     async def list_transactions(self) -> list[Transaction]:
         values = await self._client.hvals(self._transactions_key)

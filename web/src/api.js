@@ -10,7 +10,17 @@ async function request(path, options = {}) {
   });
 
   if (!response.ok) {
-    const message = await response.text().catch(() => "");
+    const body = await response.text().catch(() => "");
+    let message = body;
+    try {
+      const parsed = JSON.parse(body);
+      const detail = parsed.detail ?? parsed.message ?? parsed.error;
+      message = Array.isArray(detail)
+        ? detail.map((item) => item.msg ?? item.message ?? String(item)).join(" · ")
+        : typeof detail === "string" ? detail : body;
+    } catch {
+      // Keep a non-JSON response body as the most useful available error.
+    }
     throw new Error(message || `Request failed (${response.status})`);
   }
 
@@ -35,21 +45,21 @@ export const portfolioApi = {
     return request(`/instruments/search?q=${encodeURIComponent(query)}`, { signal });
   },
 
-  createHolding(holding) {
+  createTransaction(transaction) {
     return request("/transactions", {
       method: "POST",
-      body: JSON.stringify(holding),
+      body: JSON.stringify(transaction),
     });
   },
 
-  updateHolding(id, holding) {
+  updateTransaction(id, transaction) {
     return request(`/transactions/${encodeURIComponent(id)}`, {
       method: "PUT",
-      body: JSON.stringify(holding),
+      body: JSON.stringify(transaction),
     });
   },
 
-  deleteHolding(id) {
+  deleteTransaction(id) {
     return request(`/transactions/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });

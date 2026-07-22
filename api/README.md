@@ -33,6 +33,12 @@ used; an explicitly supplied executed or average price always wins. USD transact
 capture their USD/INR rate so historical cost remains stable while current valuations use
 the latest cached USD/INR rate.
 
+`side` is either `BUY` or `SELL`. Sells are validated against the owned quantity at the
+transaction timestamp, reduce the derived holding, and realize profit or loss using moving
+weighted-average cost. `GET /api/portfolio` includes `usd_inr_rate` with `rate`, `as_of`,
+`source`, and `is_stale`; it prefers a fresh Yahoo rate, then cached Redis data, then the
+latest stored USD transaction rate.
+
 ## Tests
 
 Tests use in-memory fakes and make no Redis or Yahoo Finance calls.

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -15,6 +17,7 @@ from ..models import (
     AllocationSlice,
     AssetType,
     Currency,
+    ExchangeRateQuote,
     FxRate,
     Holding,
     Instrument,
@@ -104,16 +107,16 @@ class PortfolioService:
         return sorted(transactions, key=lambda item: (item.traded_at, item.created_at), reverse=True)
 
     async def create_transaction(self, payload: TransactionCreate) -> Transaction:
-        async with self._mutation_lock:
+        async with self._ledger_mutation():
             transaction = await self._materialize_transaction(payload)
             transactions = await self._repository.list_transactions()
-            self._build_ledger([*transactions, transaction], validate=True)
+            self._build_ledger([*transactions, transaction])
             await self._repository.save_transaction(transaction)
             await self._rebuild_history_or_snapshot()
             return transaction
 
     async def update_transaction(self, transaction_id: UUID, payload: TransactionUpdate) -> Transaction:
-        async with self._mutation_lock:
+        async with self._ledger_mutation():
             current = await self._repository.get_transaction(transaction_id)
             if current is None:
                 raise NotFoundError("transaction not found")
@@ -159,35 +162,40 @@ class PortfolioService:
                 updated if item.id == transaction_id else item
                 for item in await self._repository.list_transactions()
             ]
-            self._build_ledger(transactions, validate=True)
+            self._build_ledger(transactions)
             await self._repository.save_transaction(updated)
             await self._rebuild_history_or_snapshot()
             return updated
 
     async def delete_transaction(self, transaction_id: UUID) -> None:
-        async with self._mutation_lock:
+        async with self._ledger_mutation():
             transactions = await self._repository.list_transactions()
             if not any(item.id == transaction_id for item in transactions):
                 raise NotFoundError("transaction not found")
             remaining = [item for item in transactions if item.id != transaction_id]
-            self._build_ledger(remaining, validate=True)
+            self._build_ledger(remaining)
             await self._repository.delete_transaction(transaction_id)
             await self._rebuild_history_or_snapshot()
 
     async def get_summary(self) -> PortfolioSummary:
-        return await self._build_summary(include_history=True)
+        return await self._build_summary(include_history=True, refresh_fx=True)
 
     async def refresh(self) -> RefreshResponse:
         transactions = await self._repository.list_transactions()
         if not transactions:
             await self._repository.replace_snapshots([])
+            warnings: list[str] = []
+            try:
+                await self._repository.save_fx_rate(await self._provider.get_usd_inr())
+            except MarketDataError as exc:
+                warnings.append(f"USD/INR rate is unavailable: {exc}")
             return RefreshResponse(
                 refreshed_symbols=[],
                 stale_symbols=[],
-                warnings=[],
+                warnings=warnings,
                 summary=await self._build_summary(include_history=True),
             )
-        ledger = self._build_ledger(transactions, validate=False)
+        ledger = self._build_ledger(transactions)
         symbols = sorted(
             symbol for symbol, position in ledger.positions.items() if position.quantity > QUANTITY_EPSILON
         )
@@ -219,11 +227,13 @@ class PortfolioService:
             except MarketDataError as exc:
                 warnings.append(str(exc))
 
-        if any(position.currency == Currency.USD for position in ledger.positions.values() if position.quantity > 0):
-            try:
-                await self._repository.save_fx_rate(await self._provider.get_usd_inr())
-            except MarketDataError as exc:
+        try:
+            await self._repository.save_fx_rate(await self._provider.get_usd_inr())
+        except MarketDataError as exc:
+            if await self._repository.get_fx_rate() is not None or self._transaction_fx_fallback(ledger):
                 warnings.append(f"Using the last available USD/INR rate: {exc}")
+            else:
+                warnings.append(f"USD/INR rate is unavailable: {exc}")
 
         summary = await self._build_summary(include_history=False)
         await self._repository.save_snapshot(self._snapshot_from_summary(summary))
@@ -271,7 +281,7 @@ class PortfolioService:
             ),
         ]
         transactions = [await self._materialize_transaction(seed) for seed in seeds]
-        self._build_ledger(transactions, validate=True)
+        self._build_ledger(transactions)
         for transaction in transactions:
             await self._repository.save_transaction(transaction)
         await self._rebuild_history_or_snapshot()
@@ -279,6 +289,8 @@ class PortfolioService:
 
     async def _materialize_transaction(self, payload: TransactionCreate) -> Transaction:
         symbol = payload.symbol.upper()
+        if payload.traded_at.astimezone(timezone.utc) > utc_now() + timedelta(minutes=5):
+            raise InvalidTransactionError("transaction date cannot be in the future")
         quote: Quote | None = None
         if payload.price is None:
             cached = await self._repository.get_quotes([symbol])
@@ -337,7 +349,7 @@ class PortfolioService:
     def _infer_currency(symbol: str) -> Currency:
         return Currency.INR if symbol.endswith((".NS", ".BO")) else Currency.USD
 
-    def _build_ledger(self, transactions: list[Transaction], validate: bool) -> _Ledger:
+    def _build_ledger(self, transactions: list[Transaction]) -> _Ledger:
         positions: dict[str, _Position] = {}
         cash_flows: list[tuple[datetime, float]] = []
         gross_buys_inr = ZERO
@@ -379,17 +391,13 @@ class PortfolioService:
                 net_invested_inr += cash_inr
                 continue
 
-            if transaction.quantity > position.quantity + QUANTITY_EPSILON:
-                if validate:
-                    raise InvalidTransactionError(
-                        f"cannot sell {transaction.quantity} {transaction.symbol}; "
-                        f"only {position.quantity} is held at that time"
-                    )
-                continue
             if position.quantity <= ZERO:
-                if validate:
-                    raise InvalidTransactionError(f"cannot sell {transaction.symbol} before buying it")
-                continue
+                raise InvalidTransactionError(f"cannot sell {transaction.symbol} before buying it")
+            if transaction.quantity > position.quantity:
+                raise InvalidTransactionError(
+                    f"cannot sell {transaction.quantity} {transaction.symbol}; "
+                    f"only {position.quantity} is held at that time"
+                )
 
             average_native = position.cost_native / position.quantity
             average_inr = position.cost_inr / position.quantity
@@ -418,16 +426,20 @@ class PortfolioService:
             first_trade_at=first_trade_at,
         )
 
-    async def _build_summary(self, include_history: bool) -> PortfolioSummary:
+    async def _build_summary(
+        self,
+        include_history: bool,
+        refresh_fx: bool = False,
+    ) -> PortfolioSummary:
         now = utc_now()
-        ledger = self._build_ledger(await self._repository.list_transactions(), validate=False)
+        ledger = self._build_ledger(await self._repository.list_transactions())
         open_positions = {
             symbol: position
             for symbol, position in ledger.positions.items()
             if position.quantity > QUANTITY_EPSILON
         }
         quotes = await self._repository.get_quotes(sorted(open_positions))
-        fx = await self._repository.get_fx_rate()
+        usd_inr_rate = await self._resolve_summary_fx(ledger, now, refresh_fx)
         holdings: list[Holding] = []
 
         total_value_inr = ZERO
@@ -452,7 +464,11 @@ class PortfolioService:
 
             current_fx = ONE
             if position.currency == Currency.USD:
-                current_fx = fx.rate if fx else position.latest_fx
+                current_fx = (
+                    Decimal(str(usd_inr_rate.rate))
+                    if usd_inr_rate is not None
+                    else position.latest_fx
+                )
 
             market_native = position.quantity * price
             market_inr = market_native * current_fx
@@ -537,6 +553,7 @@ class PortfolioService:
         return PortfolioSummary(
             portfolio_id=self._settings.portfolio_id,
             as_of=now,
+            usd_inr_rate=usd_inr_rate,
             metrics=metrics,
             holdings=holdings,
             allocation_by_holding=self._allocation(
@@ -648,7 +665,7 @@ class PortfolioService:
             if not day_transactions:
                 continue
 
-            ledger = self._build_ledger(day_transactions, validate=False)
+            ledger = self._build_ledger(day_transactions)
             total_value = ZERO
             total_cost = ZERO
             total_realized = sum(
@@ -683,3 +700,67 @@ class PortfolioService:
             )
 
         await self._repository.replace_snapshots(snapshots)
+
+    @asynccontextmanager
+    async def _ledger_mutation(self) -> AsyncIterator[None]:
+        async with self._mutation_lock:
+            async with self._repository.transaction_lock():
+                yield
+
+    async def _resolve_summary_fx(
+        self,
+        ledger: _Ledger,
+        now: datetime,
+        refresh_if_stale: bool,
+    ) -> ExchangeRateQuote | None:
+        cached = await self._repository.get_fx_rate()
+        cached_stale = True
+        if cached is not None:
+            as_of = cached.as_of
+            if as_of.tzinfo is None:
+                as_of = as_of.replace(tzinfo=timezone.utc)
+            cached_stale = (
+                now - as_of.astimezone(timezone.utc)
+            ).total_seconds() > self._settings.quote_stale_seconds
+            if not cached_stale:
+                return self._exchange_rate_quote(cached, is_stale=False)
+
+        if refresh_if_stale:
+            try:
+                fresh = await self._provider.get_usd_inr()
+                await self._repository.save_fx_rate(fresh)
+                return self._exchange_rate_quote(fresh, is_stale=False)
+            except MarketDataError:
+                pass
+
+        if cached is not None:
+            return self._exchange_rate_quote(cached, is_stale=cached_stale)
+
+        fallback = self._transaction_fx_fallback(ledger)
+        if fallback is None:
+            return None
+        return ExchangeRateQuote(
+            rate=float(fallback.latest_fx),
+            as_of=fallback.latest_trade_at or now,
+            source="transaction_fallback",
+            is_stale=True,
+        )
+
+    @staticmethod
+    def _exchange_rate_quote(rate: FxRate, is_stale: bool) -> ExchangeRateQuote:
+        return ExchangeRateQuote(
+            pair=rate.pair,
+            rate=float(rate.rate),
+            as_of=rate.as_of,
+            source=rate.source,
+            is_stale=is_stale,
+        )
+
+    @staticmethod
+    def _transaction_fx_fallback(ledger: _Ledger) -> _Position | None:
+        candidates = [
+            position
+            for position in ledger.positions.values()
+            if position.currency == Currency.USD and position.latest_trade_at is not None
+        ]
+        return max(candidates, key=lambda item: item.latest_trade_at) if candidates else None

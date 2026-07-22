@@ -132,6 +132,14 @@ class FxRate(BaseModel):
     source: str = "yahoo_finance"
 
 
+class ExchangeRateQuote(BaseModel):
+    pair: str = "USDINR"
+    rate: float
+    as_of: datetime
+    source: str
+    is_stale: bool = False
+
+
 class Holding(BaseModel):
     latest_transaction_id: UUID | None = None
     latest_traded_at: datetime | None = None
@@ -191,6 +199,7 @@ class PortfolioSummary(BaseModel):
     portfolio_id: str
     base_currency: Currency = Currency.INR
     as_of: datetime
+    usd_inr_rate: ExchangeRateQuote | None = None
     metrics: PortfolioMetrics
     holdings: list[Holding]
     allocation_by_holding: list[AllocationSlice]

@@ -1,5 +1,3 @@
-export const INR_PER_USD = 87.37;
-
 export const demoHoldings = [];
 
 export const demoSymbols = [

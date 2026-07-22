@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 from uuid import UUID
 
@@ -12,6 +13,8 @@ class PortfolioRepository(Protocol):
     async def close(self) -> None: ...
 
     async def ping(self) -> bool: ...
+
+    def transaction_lock(self) -> AbstractAsyncContextManager[None]: ...
 
     async def list_transactions(self) -> list[Transaction]: ...
 

@@ -21,12 +21,10 @@ import {
   House,
   Info,
   MagnifyingGlass,
-  PencilSimple,
   Plus,
   Receipt,
   SlidersHorizontal,
   SpinnerGap,
-  Trash,
   TrendUp,
   Wallet,
   WindowsLogo,
@@ -47,7 +45,6 @@ import {
 } from "recharts";
 import { portfolioApi } from "./api.js";
 import {
-  INR_PER_USD,
   buildDemoHistory,
   demoAllocation,
   demoHoldings,
@@ -81,8 +78,8 @@ function formatSignedMoney(value, currency = "INR", maximumFractionDigits = 0) {
   return `${sign}${formatMoney(Math.abs(amount), currency, maximumFractionDigits)}`;
 }
 
-function formatIndianCompact(value, currency = "INR") {
-  const converted = currency === "USD" ? value / INR_PER_USD : value;
+function formatIndianCompact(value, currency = "INR", usdInrRate = null) {
+  const converted = currency === "USD" && usdInrRate ? value / usdInrRate : value;
   const symbol = currency === "USD" ? "$" : "₹";
 
   if (currency === "USD") {
@@ -97,12 +94,55 @@ function formatIndianCompact(value, currency = "INR") {
   return `${symbol}${Math.round(converted)}`;
 }
 
-function valueInInr(holding, unitPrice = holding.currentPrice) {
+function valueInInr(holding, unitPrice = holding.currentPrice, usdInrRate = null) {
   if (unitPrice === holding.currentPrice && Number.isFinite(holding.marketValueInr)) {
     return holding.marketValueInr;
   }
+  if (unitPrice === holding.averagePrice && Number.isFinite(holding.costBasisInr)) {
+    return holding.costBasisInr;
+  }
   const nativeValue = Number(holding.quantity || 0) * Number(unitPrice || 0);
-  return holding.currency === "USD" ? nativeValue * INR_PER_USD : nativeValue;
+  return holding.currency === "USD" ? nativeValue * Number(usdInrRate || 0) : nativeValue;
+}
+
+function positiveNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function explicitUsdInrRate(payload, summary) {
+  const candidates = [
+    payload.usdInrRate,
+    payload.usd_inr_rate,
+    payload.usd_inr,
+    payload.fx_rate,
+    payload.fx_rate_to_inr,
+    payload.fx?.usd_inr,
+    payload.fx?.usdInr,
+    payload.fx?.rate,
+    payload.exchange_rates?.USDINR,
+    payload.exchange_rates?.USD_INR,
+    payload.market_data?.usd_inr_rate,
+    summary.usdInrRate,
+    summary.usd_inr_rate,
+    summary.usd_inr,
+    summary.fx_rate,
+    summary.fx?.rate,
+  ];
+
+  for (const candidate of candidates) {
+    const nestedValue = candidate && typeof candidate === "object"
+      ? firstDefined(candidate.rate, candidate.value)
+      : candidate;
+    const rate = positiveNumber(nestedValue);
+    if (rate) {
+      return {
+        rate,
+        isStale: Boolean(candidate && typeof candidate === "object" && firstDefined(candidate.is_stale, candidate.isStale, false)),
+      };
+    }
+  }
+  return null;
 }
 
 function assetClassFor(assetType, currency) {
@@ -137,6 +177,8 @@ function normalizeHolding(raw, index = 0) {
       firstDefined(raw.averagePrice, raw.average_price, raw.avg_price, raw.purchase_price, 0),
     ),
     currentPrice: Number(firstDefined(raw.currentPrice, raw.current_price, raw.price, 0)),
+    costBasisInr: Number(firstDefined(raw.costBasisInr, raw.cost_basis_inr, NaN)),
+    marketValueNative: Number(firstDefined(raw.marketValueNative, raw.market_value_native, NaN)),
     marketValueInr: Number(firstDefined(raw.marketValueInr, raw.market_value_inr, NaN)),
     unrealizedPnlInr: Number(firstDefined(raw.unrealizedPnlInr, raw.unrealized_pnl_inr, NaN)),
     realizedPnlInr: Number(firstDefined(raw.realizedPnlInr, raw.realized_pnl_inr, 0)),
@@ -225,8 +267,21 @@ function unpackPortfolio(response) {
   const normalizedHoldings = Array.isArray(rawHoldings)
     ? rawHoldings.map((holding, index) => normalizeHolding(holding, index))
     : [];
+  const explicitRate = explicitUsdInrRate(payload, rawSummary);
+  const inferredRate = normalizedHoldings
+    .filter((holding) => holding.currency === "USD")
+    .map((holding) => {
+      const nativeValue = positiveNumber(holding.marketValueNative)
+        || positiveNumber(holding.quantity * holding.currentPrice);
+      return nativeValue && positiveNumber(holding.marketValueInr / nativeValue);
+    })
+    .find(Boolean);
+  const usdInrRate = explicitRate?.rate || inferredRate || null;
+  const usdInrStatus = explicitRate
+    ? explicitRate.isStale ? "cached" : "live"
+    : inferredRate ? "portfolio" : "unavailable";
   const groupedAllocation = normalizedHoldings.reduce((groups, holding) => {
-    groups[holding.assetClass] = (groups[holding.assetClass] || 0) + valueInInr(holding);
+    groups[holding.assetClass] = (groups[holding.assetClass] || 0) + valueInInr(holding, holding.currentPrice, usdInrRate);
     return groups;
   }, {});
   const allocationTotal = Object.values(groupedAllocation).reduce((sum, value) => sum + value, 0);
@@ -257,6 +312,8 @@ function unpackPortfolio(response) {
       color: allocationColors[name] || demoAllocation[index % demoAllocation.length]?.color || "#d7dbd2",
     })),
     lastUpdated: firstDefined(payload.lastUpdated, payload.last_updated, payload.as_of),
+    usdInrRate,
+    usdInrStatus,
   };
 }
 
@@ -302,7 +359,7 @@ function InstrumentMark({ symbol, className = "asset-mark", color = "#5a7560" })
   );
 }
 
-function Sidebar({ onNavigate }) {
+function Sidebar({ activeItem, onNavigate }) {
   const items = [
     { id: "overview", label: "Overview", Icon: House },
     { id: "holdings", label: "Holdings", Icon: ChartPieSlice },
@@ -318,12 +375,13 @@ function Sidebar({ onNavigate }) {
       <nav className="sidebar-nav">
         {items.map(({ id, label, Icon }) => (
           <button
-            className={cx("nav-item", id === "overview" && "is-active")}
+            className={cx("nav-item", id === activeItem && "is-active")}
             key={id}
             type="button"
             onClick={() => onNavigate(id)}
+            aria-current={id === activeItem ? "page" : undefined}
           >
-            <Icon size={21} weight={id === "overview" ? "duotone" : "regular"} />
+            <Icon size={21} weight={id === activeItem ? "duotone" : "regular"} />
             <span>{label}</span>
           </button>
         ))}
@@ -338,20 +396,20 @@ function Sidebar({ onNavigate }) {
   );
 }
 
-function Topbar({ lastUpdated, refreshing, onRefresh, onAdd }) {
+function Topbar({ activeView, lastUpdated, refreshing, onRefresh, onAdd }) {
   return (
     <header className="topbar">
       <div>
-        <h1>Good morning, Harsh</h1>
+        <h1>{activeView === "holdings" ? "Holdings" : "Good morning, Harsh"}</h1>
         <p>
           <Clock size={17} />
-          Prices as of {formatTimestamp(lastUpdated)} IST
+          {activeView === "holdings" ? "Open positions" : "Prices"} as of {formatTimestamp(lastUpdated)} IST
         </p>
       </div>
       <div className="topbar-actions">
         <button className="primary-button" type="button" onClick={onAdd}>
           <Plus size={20} weight="bold" />
-          Add holding
+          Add transaction
         </button>
         <button className="text-button" type="button" onClick={onRefresh} disabled={refreshing}>
           {refreshing ? (
@@ -366,27 +424,28 @@ function Topbar({ lastUpdated, refreshing, onRefresh, onAdd }) {
   );
 }
 
-function PortfolioSummary({ summary, currency, onCurrencyChange }) {
-  const total = currency === "USD" ? summary.totalValue / INR_PER_USD : summary.totalValue;
-  const gain = currency === "USD" ? summary.allTimeGain / INR_PER_USD : summary.allTimeGain;
-  const today = currency === "USD" ? summary.todayChange / INR_PER_USD : summary.todayChange;
+function PortfolioSummary({ summary, currency, usdInrRate, onCurrencyChange }) {
+  const displayCurrency = currency === "USD" && usdInrRate ? "USD" : "INR";
+  const total = displayCurrency === "USD" ? summary.totalValue / usdInrRate : summary.totalValue;
+  const gain = displayCurrency === "USD" ? summary.allTimeGain / usdInrRate : summary.allTimeGain;
+  const today = displayCurrency === "USD" ? summary.todayChange / usdInrRate : summary.todayChange;
 
   return (
     <section className="portfolio-summary" aria-labelledby="portfolio-value-label">
       <div>
         <p className="eyebrow" id="portfolio-value-label">Portfolio value</p>
         <div className="portfolio-value">
-          {formatMoney(total, currency, currency === "USD" ? 0 : 0)}
+          {formatMoney(total, displayCurrency, 0)}
         </div>
         <div className="return-line">
           <span>All-time gain</span>
           <strong className={gain < 0 ? "negative" : gain > 0 ? "positive" : "neutral"}>
-            {formatSignedMoney(gain, currency)} ({summary.allTimeGainPercent.toFixed(2)}%)
+            {formatSignedMoney(gain, displayCurrency)} ({summary.allTimeGainPercent.toFixed(2)}%)
           </strong>
           <span className="separator" aria-hidden="true" />
           <span>Today&apos;s change</span>
           <strong className={today < 0 ? "negative" : today > 0 ? "positive" : "neutral"}>
-            {formatSignedMoney(today, currency)} ({summary.todayChangePercent.toFixed(2)}%)
+            {formatSignedMoney(today, displayCurrency)} ({summary.todayChangePercent.toFixed(2)}%)
           </strong>
         </div>
       </div>
@@ -398,6 +457,8 @@ function PortfolioSummary({ summary, currency, onCurrencyChange }) {
             className={currency === item ? "is-selected" : ""}
             onClick={() => onCurrencyChange(item)}
             aria-pressed={currency === item}
+            disabled={item === "USD" && !usdInrRate}
+            title={item === "USD" && !usdInrRate ? "USD display is available when the portfolio API returns USD/INR" : undefined}
           >
             {item}
           </button>
@@ -421,16 +482,16 @@ function ChartTooltip({ active, payload, label, currency }) {
   );
 }
 
-function PortfolioChart({ history, range, currency, benchmark, onRangeChange, onBenchmarkChange }) {
+function PortfolioChart({ history, range, currency, usdInrRate, benchmark, onRangeChange, onBenchmarkChange }) {
   const chartData = useMemo(() => {
     const days = RANGE_DAYS[range];
     const visible = Number.isFinite(days) ? history.slice(-days) : history;
     return visible.map((point) => ({
       ...point,
-      displayValue: currency === "USD" ? point.value / INR_PER_USD : point.value,
-      displayBenchmark: currency === "USD" ? point.benchmark / INR_PER_USD : point.benchmark,
+      displayValue: currency === "USD" && usdInrRate ? point.value / usdInrRate : point.value,
+      displayBenchmark: currency === "USD" && usdInrRate ? point.benchmark / usdInrRate : point.benchmark,
     }));
-  }, [benchmark, currency, history, range]);
+  }, [currency, history, range, usdInrRate]);
 
   const maxValue = Math.max(...chartData.map((point) => point.displayValue), 1);
   const chartInterval = currency === "USD" ? 10000 : 1000000;
@@ -497,7 +558,7 @@ function PortfolioChart({ history, range, currency, benchmark, onRangeChange, on
               tickLine={false}
               tick={{ fill: "#656a64", fontSize: 11 }}
               width={44}
-              tickFormatter={(value) => formatIndianCompact(value, currency).replace(currency === "INR" ? "₹" : "$", "")}
+              tickFormatter={(value) => formatIndianCompact(value, currency, usdInrRate).replace(currency === "INR" ? "₹" : "$", "")}
             />
             <Tooltip
               cursor={{ stroke: "#8d978e", strokeDasharray: "3 3" }}
@@ -536,10 +597,25 @@ function AssetMark({ holding }) {
   return <InstrumentMark symbol={holding.symbol} color={holding.color} />;
 }
 
-function HoldingsTable({ holdings, query, onQueryChange, onEdit, onDelete }) {
+function HoldingsTable({
+  holdings,
+  query,
+  usdInrRate,
+  usdInrStatus,
+  compact = false,
+  onQueryChange,
+  onBuy,
+  onSell,
+  onShowAll,
+}) {
   const [menuOpen, setMenuOpen] = useState(null);
   const filtered = holdings.filter((holding) =>
     `${holding.name} ${holding.symbol}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  const visibleHoldings = compact && !query ? filtered.slice(0, 5) : filtered;
+  const portfolioValue = holdings.reduce(
+    (sum, item) => sum + valueInInr(item, item.currentPrice, usdInrRate),
+    0,
   );
 
   return (
@@ -578,16 +654,15 @@ function HoldingsTable({ holdings, query, onQueryChange, onEdit, onDelete }) {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((holding) => {
-              const invested = valueInInr(holding, holding.averagePrice);
-              const current = valueInInr(holding);
+            {visibleHoldings.map((holding) => {
+              const invested = valueInInr(holding, holding.averagePrice, usdInrRate);
+              const current = valueInInr(holding, holding.currentPrice, usdInrRate);
               const gain = Number.isFinite(holding.unrealizedPnlInr)
                 ? holding.unrealizedPnlInr
                 : current - invested;
               const realized = Number(holding.realizedPnlInr || 0);
               const gainPercent = invested ? (gain / invested) * 100 : 0;
-              const total = holdings.reduce((sum, item) => sum + valueInInr(item), 0);
-              const allocation = total ? (current / total) * 100 : 0;
+              const allocation = portfolioValue ? (current / portfolioValue) * 100 : 0;
               const nativeInvested = holding.quantity * holding.averagePrice;
               const nativeValue = holding.quantity * holding.currentPrice;
 
@@ -641,11 +716,11 @@ function HoldingsTable({ holdings, query, onQueryChange, onEdit, onDelete }) {
                       </button>
                       {menuOpen === holding.id ? (
                         <div className="action-menu">
-                          <button type="button" onClick={() => { setMenuOpen(null); onEdit(holding); }}>
-                            <PencilSimple size={16} /> Edit holding
+                          <button type="button" onClick={() => { setMenuOpen(null); onBuy(holding); }}>
+                            <ArrowDownRight size={16} /> Buy more
                           </button>
-                          <button className="danger-action" type="button" onClick={() => { setMenuOpen(null); onDelete(holding); }}>
-                            <Trash size={16} /> Delete
+                          <button type="button" onClick={() => { setMenuOpen(null); onSell(holding); }}>
+                            <ArrowUpRight size={16} /> Sell
                           </button>
                         </div>
                       ) : null}
@@ -662,7 +737,7 @@ function HoldingsTable({ holdings, query, onQueryChange, onEdit, onDelete }) {
             <strong>{holdings.length === 0 ? "No holdings yet" : "No holdings found"}</strong>
             <span>
               {holdings.length === 0
-                ? "Use Add holding to create your first Redis-backed entry."
+                ? "Use Add transaction to record your first purchase."
                 : "Try a company name or ticker symbol."}
             </span>
           </div>
@@ -670,10 +745,75 @@ function HoldingsTable({ holdings, query, onQueryChange, onEdit, onDelete }) {
       </div>
       <footer className="table-footer">
         <span>US stocks show values in USD with INR equivalent below.</span>
-        <strong>INR/USD: {INR_PER_USD.toFixed(2)}</strong>
-        <button type="button">Show more <CaretDown size={13} /></button>
+        <strong className="fx-rate">
+          {usdInrRate ? `USD/INR: ${usdInrRate.toFixed(2)}` : "USD/INR unavailable"}
+          <em className={`is-${usdInrStatus}`}>
+            {usdInrStatus === "live"
+              ? "Live"
+              : usdInrStatus === "cached"
+                ? "Cached"
+                : usdInrStatus === "portfolio" ? "Portfolio rate" : "Unavailable"}
+          </em>
+        </strong>
+        {onShowAll ? (
+          <button type="button" onClick={onShowAll}>View all holdings <CaretDown size={13} /></button>
+        ) : <span aria-hidden="true" />}
       </footer>
     </section>
+  );
+}
+
+function HoldingsView({
+  holdings,
+  summary,
+  query,
+  usdInrRate,
+  usdInrStatus,
+  onQueryChange,
+  onBuy,
+  onSell,
+}) {
+  const unrealizedClass = summary.unrealizedGain < 0
+    ? "negative"
+    : summary.unrealizedGain > 0 ? "positive" : "neutral";
+
+  return (
+    <div className="holdings-view">
+      <section className="holdings-view-intro" aria-labelledby="positions-heading">
+        <div>
+          <p className="eyebrow">Position book</p>
+          <h2 id="positions-heading">All open positions</h2>
+          <p>Review exposure, buy more, sell units, or correct the latest transaction.</p>
+        </div>
+        <dl className="holdings-stats">
+          <div>
+            <dt>Portfolio value</dt>
+            <dd>{formatMoney(summary.totalValue, "INR")}</dd>
+          </div>
+          <div>
+            <dt>Net invested</dt>
+            <dd>{formatMoney(summary.invested - summary.withdrawn, "INR")}</dd>
+          </div>
+          <div>
+            <dt>Unrealized P&amp;L</dt>
+            <dd className={unrealizedClass}>{formatSignedMoney(summary.unrealizedGain, "INR")}</dd>
+          </div>
+          <div>
+            <dt>Positions</dt>
+            <dd>{holdings.length}</dd>
+          </div>
+        </dl>
+      </section>
+      <HoldingsTable
+        holdings={holdings}
+        query={query}
+        usdInrRate={usdInrRate}
+        usdInrStatus={usdInrStatus}
+        onQueryChange={onQueryChange}
+        onBuy={onBuy}
+        onSell={onSell}
+      />
+    </div>
   );
 }
 
@@ -818,11 +958,20 @@ function normalizeSearchResult(item) {
     assetType: String(assetType || "STOCK").toUpperCase().includes("ETF") ? "ETF" : "STOCK",
     currency,
     price: Number(firstDefined(item.price, item.current_price, item.regular_market_price, 0)),
+    availableQuantity: positiveNumber(firstDefined(item.availableQuantity, item.available_quantity, item.quantity)),
   };
 }
 
-function HoldingDrawer({ holding, onClose, onSave }) {
-  const isEditing = Boolean(holding);
+function TransactionDrawer({
+  holding,
+  holdings,
+  initialSide,
+  usdInrRate,
+  usdInrStatus,
+  onClose,
+  onSave,
+}) {
+  const [side, setSide] = useState(initialSide);
   const [selectedSymbol, setSelectedSymbol] = useState(holding ? normalizeSearchResult({ ...holding, price: holding.currentPrice }) : null);
   const [searchOpen, setSearchOpen] = useState(!holding);
   const [results, setResults] = useState([]);
@@ -834,18 +983,39 @@ function HoldingDrawer({ holding, onClose, onSave }) {
     market: holding?.market ?? "NSE",
     assetClass: holding?.assetClass ?? "Indian Stocks",
     currency: holding?.currency ?? "INR",
-    quantity: holding?.quantity ?? "",
-    averagePrice: holding?.averagePrice ?? "",
+    quantity: "",
+    averagePrice: holding?.currentPrice ?? "",
     currentPrice: holding?.currentPrice ?? "",
-    date: holding?.tradedAt
-      ? String(holding.tradedAt).slice(0, 10)
-      : new Date().toISOString().slice(0, 10),
+    date: new Date().toISOString().slice(0, 10),
   });
   const searchRef = useRef(null);
+  const heldPosition = holdings.find((item) => item.symbol === form.symbol);
+  const availableQuantity = side === "SELL" ? Number(heldPosition?.quantity || 0) : null;
+  const exceedsAvailable = side === "SELL"
+    && Number(form.quantity || 0) > availableQuantity;
 
   useEffect(() => {
     const query = form.symbol.trim();
-    if (!searchOpen || query.length < 1) {
+    if (!searchOpen) {
+      setResults([]);
+      setSearching(false);
+      return undefined;
+    }
+
+    if (side === "SELL") {
+      const heldResults = holdings
+        .filter((item) => `${item.symbol} ${item.name}`.toLowerCase().includes(query.toLowerCase()))
+        .map((item) => normalizeSearchResult({
+          ...item,
+          price: item.currentPrice,
+          availableQuantity: item.quantity,
+        }));
+      setResults(heldResults);
+      setSearching(false);
+      return undefined;
+    }
+
+    if (query.length < 1) {
       setResults([]);
       setSearching(false);
       return undefined;
@@ -872,7 +1042,24 @@ function HoldingDrawer({ holding, onClose, onSave }) {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [form.symbol, searchOpen]);
+  }, [form.symbol, holdings, searchOpen, side]);
+
+  function changeSide(nextSide) {
+    if (nextSide === side) return;
+    setSide(nextSide);
+    setSearchOpen(true);
+    if (nextSide === "SELL" && !holdings.some((item) => item.symbol === form.symbol)) {
+      setSelectedSymbol(null);
+      setForm((current) => ({
+        ...current,
+        symbol: "",
+        name: "",
+        quantity: "",
+        averagePrice: "",
+        currentPrice: "",
+      }));
+    }
+  }
 
   function chooseSymbol(item) {
     const normalized = normalizeSearchResult(item);
@@ -887,17 +1074,19 @@ function HoldingDrawer({ holding, onClose, onSave }) {
       assetClass: normalized.assetClass,
       currency: normalized.currency,
       currentPrice: roundedPrice,
-      averagePrice: current.averagePrice || roundedPrice,
+      averagePrice: normalized.symbol === current.symbol && current.averagePrice
+        ? current.averagePrice
+        : roundedPrice,
     }));
   }
 
   async function handleSubmit(event) {
     event.preventDefault();
-    if (!form.symbol || !form.quantity || !form.averagePrice) return;
+    if (!form.symbol || !form.quantity || !form.averagePrice || exceedsAvailable) return;
     setSaving(true);
     await onSave({
       ...form,
-      id: holding?.id,
+      side,
       quantity: Number(form.quantity),
       averagePrice: Number(form.averagePrice),
       currentPrice: Number(form.currentPrice || form.averagePrice),
@@ -905,17 +1094,41 @@ function HoldingDrawer({ holding, onClose, onSave }) {
     setSaving(false);
   }
 
-  const totalCost = Number(form.quantity || 0) * Number(form.averagePrice || 0);
+  const transactionValue = Number(form.quantity || 0) * Number(form.averagePrice || 0);
+  const sideLabel = side === "BUY" ? "Buy" : "Sell";
+  const drawerTitle = `${sideLabel} an investment`;
+  const drawerSubtitle = side === "BUY"
+    ? "Search Yahoo Finance and record a dated purchase."
+    : "Choose an open position and record the units sold.";
+  const canSubmit = Boolean(form.symbol && form.quantity && form.averagePrice) && !exceedsAvailable;
 
   return (
     <DrawerShell
-      title={isEditing ? "Edit holding" : "Add a holding"}
-      subtitle={isEditing ? "Update the position details used in your portfolio." : "Search a Yahoo Finance symbol and record your purchase."}
+      title={drawerTitle}
+      subtitle={drawerSubtitle}
       onClose={onClose}
     >
       <form className="holding-form" onSubmit={handleSubmit}>
+        <div className="transaction-side-control" role="group" aria-label="Transaction side">
+          <button
+            className={side === "BUY" ? "is-selected" : ""}
+            type="button"
+            onClick={() => changeSide("BUY")}
+            aria-pressed={side === "BUY"}
+          >
+            <ArrowDownRight size={17} /> Buy
+          </button>
+          <button
+            className={side === "SELL" ? "is-selected sell-side" : ""}
+            type="button"
+            onClick={() => changeSide("SELL")}
+            aria-pressed={side === "SELL"}
+          >
+            <ArrowUpRight size={17} /> Sell
+          </button>
+        </div>
         <div className="field-group symbol-field" ref={searchRef}>
-          <label htmlFor="symbol-search">Symbol or company</label>
+          <label htmlFor="symbol-search">{side === "BUY" ? "Symbol or company" : "Holding to sell"}</label>
           <div className="field-with-icon">
             <MagnifyingGlass size={19} />
             <input
@@ -927,7 +1140,7 @@ function HoldingDrawer({ holding, onClose, onSave }) {
                 setSearchOpen(true);
                 setForm((current) => ({ ...current, symbol: event.target.value.toUpperCase(), name: "" }));
               }}
-              placeholder="Try RELIANCE.NS or AAPL"
+              placeholder={side === "BUY" ? "Try RELIANCE.NS or AAPL" : "Search your open positions"}
               autoComplete="off"
               required
             />
@@ -944,10 +1157,19 @@ function HoldingDrawer({ holding, onClose, onSave }) {
                   </span>
                   <span>
                     <strong>{formatMoney(item.price, item.currency, 2)}</strong>
-                    <small>{item.market}</small>
+                    <small>
+                      {side === "SELL" && item.availableQuantity
+                        ? `${item.availableQuantity.toLocaleString("en-IN")} available`
+                        : item.market}
+                    </small>
                   </span>
                 </button>
               ))}
+            </div>
+          ) : null}
+          {searchOpen && side === "SELL" && results.length === 0 ? (
+            <div className="sell-search-empty">
+              {holdings.length === 0 ? "There are no open positions to sell." : "No held symbol matches this search."}
             </div>
           ) : null}
         </div>
@@ -964,26 +1186,36 @@ function HoldingDrawer({ holding, onClose, onSave }) {
             <div>
               <small>Latest close</small>
               <strong>{formatMoney(form.currentPrice, form.currency, 2)}</strong>
+              {side === "SELL" ? <small>{availableQuantity.toLocaleString("en-IN")} units available</small> : null}
             </div>
           </div>
         ) : null}
 
         <div className="form-row">
           <div className="field-group">
-            <label htmlFor="quantity">Quantity</label>
+            <label htmlFor="quantity">Quantity to {side === "BUY" ? "buy" : "sell"}</label>
             <input
               id="quantity"
               type="number"
               min="0.0001"
+              max={side === "SELL" && availableQuantity ? availableQuantity : undefined}
               step="any"
               value={form.quantity}
               onChange={(event) => setForm((current) => ({ ...current, quantity: event.target.value }))}
               placeholder="0"
+              aria-describedby={side === "SELL" ? "available-quantity" : undefined}
               required
             />
+            {side === "SELL" ? (
+              <small id="available-quantity" className={cx("field-hint", exceedsAvailable && "field-error")}>
+                {exceedsAvailable
+                  ? `Only ${availableQuantity.toLocaleString("en-IN")} units are available.`
+                  : `${availableQuantity.toLocaleString("en-IN")} units available to sell.`}
+              </small>
+            ) : null}
           </div>
           <div className="field-group">
-            <label htmlFor="average-price">Average purchase price</label>
+            <label htmlFor="average-price">{side === "BUY" ? "Purchase" : "Sale"} price per unit</label>
             <div className="input-prefix">
               <span>{form.currency === "USD" ? "$" : "₹"}</span>
               <input
@@ -1002,11 +1234,11 @@ function HoldingDrawer({ holding, onClose, onSave }) {
 
         <div className="form-row">
           <div className="field-group">
-            <label htmlFor="purchase-date">Purchase date</label>
+            <label htmlFor="transaction-date">{side === "BUY" ? "Purchase" : "Sale"} date</label>
             <div className="field-with-icon date-field">
               <CalendarBlank size={18} />
               <input
-                id="purchase-date"
+                id="transaction-date"
                 type="date"
                 max={new Date().toISOString().slice(0, 10)}
                 value={form.date}
@@ -1025,16 +1257,22 @@ function HoldingDrawer({ holding, onClose, onSave }) {
         </div>
 
         <div className="cost-preview">
-          <span>Purchase value</span>
-          <strong>{formatMoney(totalCost, form.currency, form.currency === "USD" ? 2 : 0)}</strong>
-          {form.currency === "USD" ? <small>≈ {formatMoney(totalCost * INR_PER_USD, "INR")}</small> : null}
+          <span>{side === "BUY" ? "Purchase value" : "Estimated proceeds"}</span>
+          <strong>{formatMoney(transactionValue, form.currency, form.currency === "USD" ? 2 : 0)}</strong>
+          {form.currency === "USD" ? (
+            <small>
+              {usdInrRate
+                ? `≈ ${formatMoney(transactionValue * usdInrRate, "INR")} · ${usdInrStatus === "live" ? "Live" : usdInrStatus === "cached" ? "Cached" : "Portfolio"} USD/INR ${usdInrRate.toFixed(2)}`
+                : "INR conversion unavailable until a portfolio FX rate is received"}
+            </small>
+          ) : null}
         </div>
 
         <div className="drawer-actions">
           <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
-          <button className="primary-button" type="submit" disabled={saving || !form.quantity || !form.averagePrice}>
+          <button className={cx("primary-button", side === "SELL" && "sell-button")} type="submit" disabled={saving || !canSubmit}>
             {saving ? <SpinnerGap className="spin" size={18} /> : <Check size={18} weight="bold" />}
-            {saving ? "Saving…" : isEditing ? "Save changes" : "Add holding"}
+            {saving ? "Saving…" : `${sideLabel} ${form.symbol || "investment"}`}
           </button>
         </div>
       </form>
@@ -1070,13 +1308,13 @@ function TransactionsDrawer({ transactions, onClose }) {
       </div>
       <div className="drawer-callout">
         <Info size={19} />
-        <p>Transactions drive XIRR and historical portfolio value. Add purchases from the main “Add holding” action.</p>
+        <p>Transactions drive XIRR and historical portfolio value. Record buys and sells from the main “Add transaction” action or a holding&apos;s row menu.</p>
       </div>
     </DrawerShell>
   );
 }
 
-function SettingsDrawer({ currency, benchmark, onCurrencyChange, onBenchmarkChange, onClose }) {
+function SettingsDrawer({ currency, usdInrRate, benchmark, onCurrencyChange, onBenchmarkChange, onClose }) {
   return (
     <DrawerShell title="Portfolio settings" subtitle="Personalise how this dashboard is presented." onClose={onClose}>
       <div className="settings-list">
@@ -1084,7 +1322,7 @@ function SettingsDrawer({ currency, benchmark, onCurrencyChange, onBenchmarkChan
           <span className="setting-icon"><CurrencyInr size={20} /></span>
           <div><strong>Display currency</strong><p>Change summary values and chart labels.</p></div>
           <div className="mini-segmented">
-            {["INR", "USD"].map((item) => <button className={currency === item ? "is-selected" : ""} type="button" key={item} onClick={() => onCurrencyChange(item)}>{item}</button>)}
+            {["INR", "USD"].map((item) => <button className={currency === item ? "is-selected" : ""} type="button" key={item} onClick={() => onCurrencyChange(item)} disabled={item === "USD" && !usdInrRate}>{item}</button>)}
           </div>
         </section>
         <section>
@@ -1125,14 +1363,17 @@ export function App() {
   const [history, setHistory] = useState(() => buildDemoHistory());
   const [allocation, setAllocation] = useState(demoAllocation);
   const [transactions, setTransactions] = useState(demoTransactions);
+  const [activeView, setActiveView] = useState("overview");
   const [currency, setCurrency] = useState("INR");
   const [range, setRange] = useState("All");
   const [benchmark, setBenchmark] = useState(false);
   const [query, setQuery] = useState("");
   const [lastUpdated, setLastUpdated] = useState(new Date("2026-07-22T10:12:00+05:30"));
+  const [usdInrRate, setUsdInrRate] = useState(null);
+  const [usdInrStatus, setUsdInrStatus] = useState("unavailable");
   const [refreshing, setRefreshing] = useState(false);
   const [drawer, setDrawer] = useState(null);
-  const [editingHolding, setEditingHolding] = useState(null);
+  const [transactionContext, setTransactionContext] = useState(null);
   const [toast, setToast] = useState(null);
 
   const showToast = useCallback((message, kind = "success") => {
@@ -1145,6 +1386,8 @@ export function App() {
     setHistory(next.history);
     setAllocation(next.allocation);
     setSummary(next.summary);
+    setUsdInrRate(next.usdInrRate);
+    setUsdInrStatus(next.usdInrStatus);
     if (next.lastUpdated) {
       const parsed = new Date(next.lastUpdated);
       if (!Number.isNaN(parsed.getTime())) setLastUpdated(parsed);
@@ -1164,6 +1407,10 @@ export function App() {
       .catch(() => {});
     return () => controller.abort();
   }, [applyPortfolio]);
+
+  useEffect(() => {
+    if (!usdInrRate && currency === "USD") setCurrency("INR");
+  }, [currency, usdInrRate]);
 
   useEffect(() => {
     if (!drawer) return undefined;
@@ -1220,24 +1467,32 @@ export function App() {
       setDrawer("settings");
       return;
     }
-    const id = destination === "analytics" ? "analytics-section" : destination === "holdings" ? "holdings-section" : "portfolio-top";
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (destination === "holdings") {
+      setActiveView("holdings");
+      setDrawer(null);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    setActiveView("overview");
+    setDrawer(null);
+    if (destination === "analytics") {
+      window.setTimeout(() => {
+        document.getElementById("analytics-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 0);
+      return;
+    }
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function openAddDrawer() {
-    setEditingHolding(null);
-    setDrawer("holding");
+  function openTransactionDrawer(side = "BUY", holding = null) {
+    setTransactionContext({ side, holding });
+    setDrawer("transaction");
   }
 
-  function openEditDrawer(holding) {
-    setEditingHolding(holding);
-    setDrawer("holding");
-  }
-
-  async function saveHolding(form) {
+  async function saveTransaction(form) {
     const payload = {
       symbol: form.symbol,
-      side: "BUY",
+      side: form.side,
       quantity: form.quantity,
       price: form.averagePrice,
       traded_at: `${form.date}T12:00:00+05:30`,
@@ -1247,64 +1502,89 @@ export function App() {
     };
 
     try {
-      if (form.id) await portfolioApi.updateHolding(form.id, payload);
-      else await portfolioApi.createHolding(payload);
+      await portfolioApi.createTransaction(payload);
       await reloadPortfolio();
-      showToast(form.id ? `${form.symbol} was updated.` : `${form.symbol} was added to your portfolio.`);
-    } catch {
-      const localHolding = normalizeHolding({ ...form, id: form.id || `local-${Date.now()}` });
-      setHoldings((current) => form.id
-        ? current.map((item) => item.id === form.id ? localHolding : item)
-        : [...current, localHolding]);
-      showToast(`${form.symbol} is saved in this preview. Connect the data service to persist it.`, "warning");
-    }
-    setDrawer(null);
-    setEditingHolding(null);
-  }
-
-  async function deleteHolding(holding) {
-    const confirmed = window.confirm(`Delete ${holding.name} from this portfolio?`);
-    if (!confirmed) return;
-    try {
-      await portfolioApi.deleteHolding(holding.id);
-      await reloadPortfolio();
-      showToast(`${holding.symbol} was removed.`);
-    } catch {
-      setHoldings((current) => current.filter((item) => item.id !== holding.id));
-      showToast(`${holding.symbol} was removed from this preview.`, "warning");
+      showToast(
+        `${form.side === "BUY" ? "Bought" : "Sold"} ${form.quantity.toLocaleString("en-IN")} ${form.symbol}.`,
+      );
+      setDrawer(null);
+      setTransactionContext(null);
+    } catch (error) {
+      showToast(error?.message || "The transaction could not be saved. Your portfolio is unchanged.", "warning");
     }
   }
 
   return (
     <div className="app-shell">
-      <Sidebar onNavigate={handleNavigate} />
+      <Sidebar
+        activeItem={drawer === "transactions" ? "transactions" : activeView}
+        onNavigate={handleNavigate}
+      />
       <main className="workspace" id="portfolio-top">
-        <Topbar lastUpdated={lastUpdated} refreshing={refreshing} onRefresh={handleRefresh} onAdd={openAddDrawer} />
-        <div className="content-grid">
-          <div className="portfolio-column">
-            <PortfolioSummary summary={summary} currency={currency} onCurrencyChange={setCurrency} />
-            <PortfolioChart
-              history={history}
-              range={range}
-              currency={currency}
-              benchmark={benchmark}
-              onRangeChange={setRange}
-              onBenchmarkChange={setBenchmark}
-            />
-            <HoldingsTable
-              holdings={holdings}
-              query={query}
-              onQueryChange={setQuery}
-              onEdit={openEditDrawer}
-              onDelete={deleteHolding}
-            />
+        <Topbar
+          activeView={activeView}
+          lastUpdated={lastUpdated}
+          refreshing={refreshing}
+          onRefresh={handleRefresh}
+          onAdd={() => openTransactionDrawer("BUY")}
+        />
+        {activeView === "overview" ? (
+          <div className="content-grid">
+            <div className="portfolio-column">
+              <PortfolioSummary
+                summary={summary}
+                currency={currency}
+                usdInrRate={usdInrRate}
+                onCurrencyChange={setCurrency}
+              />
+              <PortfolioChart
+                history={history}
+                range={range}
+                currency={currency}
+                usdInrRate={usdInrRate}
+                benchmark={benchmark}
+                onRangeChange={setRange}
+                onBenchmarkChange={setBenchmark}
+              />
+              <HoldingsTable
+                holdings={holdings}
+                query={query}
+                usdInrRate={usdInrRate}
+                usdInrStatus={usdInrStatus}
+                compact
+                onQueryChange={setQuery}
+                onBuy={(holding) => openTransactionDrawer("BUY", holding)}
+                onSell={(holding) => openTransactionDrawer("SELL", holding)}
+                onShowAll={() => setActiveView("holdings")}
+              />
+            </div>
+            <MetricsRail summary={summary} allocation={allocation} />
           </div>
-          <MetricsRail summary={summary} allocation={allocation} />
-        </div>
+        ) : (
+          <HoldingsView
+            holdings={holdings}
+            summary={summary}
+            query={query}
+            usdInrRate={usdInrRate}
+            usdInrStatus={usdInrStatus}
+            onQueryChange={setQuery}
+            onBuy={(holding) => openTransactionDrawer("BUY", holding)}
+            onSell={(holding) => openTransactionDrawer("SELL", holding)}
+          />
+        )}
       </main>
 
-      {drawer === "holding" ? (
-        <HoldingDrawer holding={editingHolding} onClose={() => setDrawer(null)} onSave={saveHolding} />
+      {drawer === "transaction" && transactionContext ? (
+        <TransactionDrawer
+          key={`${transactionContext.side}-${transactionContext.holding?.symbol || "new"}`}
+          holding={transactionContext.holding}
+          holdings={holdings}
+          initialSide={transactionContext.side}
+          usdInrRate={usdInrRate}
+          usdInrStatus={usdInrStatus}
+          onClose={() => { setDrawer(null); setTransactionContext(null); }}
+          onSave={saveTransaction}
+        />
       ) : null}
       {drawer === "transactions" ? (
         <TransactionsDrawer transactions={transactions} onClose={() => setDrawer(null)} />
@@ -1312,6 +1592,7 @@ export function App() {
       {drawer === "settings" ? (
         <SettingsDrawer
           currency={currency}
+          usdInrRate={usdInrRate}
           benchmark={benchmark}
           onCurrencyChange={setCurrency}
           onBenchmarkChange={setBenchmark}

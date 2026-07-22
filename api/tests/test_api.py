@@ -55,6 +55,8 @@ def test_api_contract_and_crud(settings) -> None:
 
         portfolio = client.get("/api/portfolio")
         assert portfolio.status_code == 200
+        assert portfolio.json()["usd_inr_rate"]["rate"] == 83
+        assert portfolio.json()["usd_inr_rate"]["source"] == "yahoo_finance"
         assert portfolio.json()["metrics"]["holdings_count"] == 1
         assert portfolio.json()["holdings"][0]["current_price"] == 220
 
@@ -81,3 +83,38 @@ def test_api_rejects_oversell_and_returns_not_found(settings) -> None:
 
         missing = client.delete("/api/transactions/11111111-1111-1111-1111-111111111111")
         assert missing.status_code == 404
+
+
+def test_api_sell_reduces_holding_and_reports_realized_pnl(settings) -> None:
+    app = create_app(settings, FakeRepository(), FakeProvider())
+    with TestClient(app) as client:
+        buy = client.post(
+            "/api/transactions",
+            json={
+                "symbol": "RELIANCE.NS",
+                "side": "BUY",
+                "quantity": 10,
+                "price": 100,
+                "currency": "INR",
+                "traded_at": "2025-01-01T10:00:00Z",
+            },
+        )
+        assert buy.status_code == 201
+        sell = client.post(
+            "/api/transactions",
+            json={
+                "symbol": "RELIANCE.NS",
+                "side": "SELL",
+                "quantity": 4,
+                "price": 150,
+                "currency": "INR",
+                "traded_at": "2025-02-01T10:00:00Z",
+            },
+        )
+        assert sell.status_code == 201
+
+        portfolio = client.get("/api/portfolio")
+        assert portfolio.status_code == 200
+        assert portfolio.json()["holdings"][0]["quantity"] == 6
+        assert portfolio.json()["holdings"][0]["average_price"] == 100
+        assert portfolio.json()["metrics"]["realized_pnl_inr"] == 200

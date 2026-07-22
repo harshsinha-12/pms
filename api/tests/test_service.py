@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.exceptions import InvalidTransactionError
-from app.models import Currency, Quote, Side, TransactionCreate
+from app.models import Currency, FxRate, Quote, Side, TransactionCreate, TransactionUpdate
 from app.services.portfolio import PortfolioService
 
 from .fakes import FakeProvider, FakeRepository
@@ -23,6 +23,8 @@ async def test_empty_portfolio_refresh_stays_zero_without_snapshot(
     assert result.summary.metrics.current_value_inr == 0
     assert result.summary.metrics.realized_pnl_inr == 0
     assert result.summary.metrics.unrealized_pnl_inr == 0
+    assert result.summary.usd_inr_rate is not None
+    assert result.summary.usd_inr_rate.rate == 83
     assert result.summary.history == []
     assert repository.snapshots == {}
 
@@ -154,3 +156,182 @@ async def test_oversell_is_rejected(
                 currency=Currency.INR,
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_exact_quantity_guard_rejects_smallest_decimal_oversell_at_trade_time(
+    repository: FakeRepository,
+    provider: FakeProvider,
+    settings,
+) -> None:
+    service = PortfolioService(repository, provider, settings)
+    bought_at = datetime.now(timezone.utc) - timedelta(days=2)
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="RELIANCE.NS",
+            quantity=Decimal("1"),
+            price=Decimal("100"),
+            currency=Currency.INR,
+            traded_at=bought_at,
+        )
+    )
+
+    with pytest.raises(InvalidTransactionError, match="only 1 is held"):
+        await service.create_transaction(
+            TransactionCreate(
+                symbol="RELIANCE.NS",
+                side=Side.SELL,
+                quantity=Decimal("1.00000001"),
+                price=Decimal("110"),
+                currency=Currency.INR,
+                traded_at=bought_at + timedelta(days=1),
+            )
+        )
+    assert len(repository.transactions) == 1
+
+    with pytest.raises(InvalidTransactionError, match="before buying"):
+        await service.create_transaction(
+            TransactionCreate(
+                symbol="RELIANCE.NS",
+                side=Side.SELL,
+                quantity=Decimal("0.5"),
+                price=Decimal("110"),
+                currency=Currency.INR,
+                traded_at=bought_at - timedelta(days=1),
+            )
+        )
+    assert len(repository.transactions) == 1
+
+
+@pytest.mark.asyncio
+async def test_closed_position_keeps_realized_pnl_and_reopens_with_new_average(
+    repository: FakeRepository,
+    provider: FakeProvider,
+    settings,
+) -> None:
+    service = PortfolioService(repository, provider, settings)
+    start = datetime.now(timezone.utc) - timedelta(days=3)
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="RELIANCE.NS",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            fees=Decimal("10"),
+            currency=Currency.INR,
+            traded_at=start,
+        )
+    )
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="RELIANCE.NS",
+            side=Side.SELL,
+            quantity=Decimal("10"),
+            price=Decimal("150"),
+            fees=Decimal("10"),
+            currency=Currency.INR,
+            traded_at=start + timedelta(days=1),
+        )
+    )
+
+    closed = await service.get_summary()
+    assert closed.holdings == []
+    assert closed.metrics.realized_pnl_inr == 480
+    assert closed.metrics.unrealized_pnl_inr == 0
+    assert closed.history[-1].realized_pnl_inr == 480
+
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="RELIANCE.NS",
+            quantity=Decimal("2"),
+            price=Decimal("200"),
+            currency=Currency.INR,
+            traded_at=start + timedelta(days=2),
+        )
+    )
+    reopened = await service.get_summary()
+    assert reopened.holdings[0].quantity == 2
+    assert reopened.holdings[0].average_price == 200
+    assert reopened.metrics.realized_pnl_inr == 480
+
+
+@pytest.mark.asyncio
+async def test_update_and_delete_cannot_invalidate_later_sell(
+    repository: FakeRepository,
+    provider: FakeProvider,
+    settings,
+) -> None:
+    service = PortfolioService(repository, provider, settings)
+    start = datetime.now(timezone.utc) - timedelta(days=2)
+    buy = await service.create_transaction(
+        TransactionCreate(
+            symbol="RELIANCE.NS",
+            quantity=Decimal("5"),
+            price=Decimal("100"),
+            currency=Currency.INR,
+            traded_at=start,
+        )
+    )
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="RELIANCE.NS",
+            side=Side.SELL,
+            quantity=Decimal("4"),
+            price=Decimal("120"),
+            currency=Currency.INR,
+            traded_at=start + timedelta(days=1),
+        )
+    )
+
+    with pytest.raises(InvalidTransactionError, match="only 3 is held"):
+        await service.update_transaction(
+            buy.id,
+            TransactionUpdate(quantity=Decimal("3")),
+        )
+    assert repository.transactions[buy.id].quantity == Decimal("5")
+
+    with pytest.raises(InvalidTransactionError, match="before buying"):
+        await service.delete_transaction(buy.id)
+    assert buy.id in repository.transactions
+
+
+@pytest.mark.asyncio
+async def test_portfolio_exposes_fresh_cached_and_transaction_fallback_fx(
+    repository: FakeRepository,
+    provider: FakeProvider,
+    settings,
+) -> None:
+    service = PortfolioService(repository, provider, settings)
+    traded_at = datetime.now(timezone.utc) - timedelta(days=2)
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="AAPL",
+            quantity=Decimal("1"),
+            price=Decimal("100"),
+            currency=Currency.USD,
+            fx_rate_to_inr=Decimal("80"),
+            traded_at=traded_at,
+        )
+    )
+
+    fresh = await service.get_summary()
+    assert fresh.usd_inr_rate is not None
+    assert fresh.usd_inr_rate.rate == 83
+    assert fresh.usd_inr_rate.source == "yahoo_finance"
+    assert fresh.usd_inr_rate.is_stale is False
+
+    repository.fx_rate = FxRate(
+        rate=Decimal("82"),
+        as_of=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    provider.fail_fx = True
+    cached = await service.get_summary()
+    assert cached.usd_inr_rate is not None
+    assert cached.usd_inr_rate.rate == 82
+    assert cached.usd_inr_rate.is_stale is True
+
+    repository.fx_rate = None
+    fallback = await service.get_summary()
+    assert fallback.usd_inr_rate is not None
+    assert fallback.usd_inr_rate.rate == 80
+    assert fallback.usd_inr_rate.source == "transaction_fallback"
+    assert fallback.usd_inr_rate.is_stale is True

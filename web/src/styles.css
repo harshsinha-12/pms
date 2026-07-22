@@ -191,6 +191,15 @@ input:focus-visible {
   transform: translateY(-1px);
 }
 
+.primary-button.sell-button {
+  background: linear-gradient(180deg, #9e4b42, #873b34);
+  box-shadow: 0 1px 1px rgba(68, 20, 16, 0.2), 0 7px 18px rgba(122, 50, 43, 0.09);
+}
+
+.primary-button.sell-button:hover:not(:disabled) {
+  background: #79352f;
+}
+
 .primary-button:disabled,
 .text-button:disabled {
   cursor: wait;
@@ -227,6 +236,71 @@ input:focus-visible {
 .portfolio-column {
   min-width: 0;
   padding: 34px 28px 0 27px;
+}
+
+.holdings-view {
+  padding: 34px 28px 48px 27px;
+}
+
+.holdings-view-intro {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding-bottom: 29px;
+  gap: 34px;
+  border-bottom: 1px solid var(--line);
+}
+
+.holdings-view-intro h2 {
+  margin: 4px 0 7px;
+  font-family: var(--serif);
+  font-size: clamp(34px, 4vw, 49px);
+  font-weight: 400;
+  letter-spacing: -0.045em;
+}
+
+.holdings-view-intro > div > p:last-child {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.holdings-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(108px, 1fr));
+  min-width: min(660px, 58vw);
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(252, 251, 247, 0.62);
+}
+
+.holdings-stats > div {
+  display: grid;
+  min-height: 70px;
+  padding: 13px 15px;
+  gap: 6px;
+  border-right: 1px solid var(--line);
+}
+
+.holdings-stats > div:last-child {
+  border-right: 0;
+}
+
+.holdings-stats dt {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.holdings-stats dd {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.holdings-view .holdings-section {
+  margin-top: 27px;
 }
 
 .portfolio-summary {
@@ -321,6 +395,12 @@ input:focus-visible {
   background: #fbfaf7;
   box-shadow: 0 1px 2px rgba(30, 35, 30, 0.05);
   color: var(--green);
+}
+
+.currency-toggle button:disabled,
+.mini-segmented button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
 }
 
 .chart-section {
@@ -673,7 +753,7 @@ tbody tr:hover {
   top: 31px;
   right: 0;
   display: grid;
-  width: 145px;
+  width: 136px;
   padding: 5px;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -734,6 +814,36 @@ tbody tr:hover {
 .table-footer strong {
   color: #333833;
   font-weight: 500;
+}
+
+.fx-rate {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.fx-rate em {
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: #e5eee3;
+  color: var(--green);
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.fx-rate em.is-cached,
+.fx-rate em.is-portfolio {
+  background: #eee9dc;
+  color: #7d622c;
+}
+
+.fx-rate em.is-unavailable {
+  background: #ecebe6;
+  color: #787c77;
 }
 
 .table-footer button {
@@ -1022,6 +1132,43 @@ tbody tr:hover {
   padding: 25px 28px 28px;
 }
 
+.transaction-side-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 23px;
+  padding: 3px;
+  gap: 3px;
+  border: 1px solid var(--line-dark);
+  border-radius: 8px;
+  background: #eeede6;
+}
+
+.transaction-side-control button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 39px;
+  gap: 7px;
+  border-radius: 6px;
+  background: transparent;
+  color: #555b55;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.transaction-side-control button.is-selected {
+  border: 1px solid #d9ded5;
+  background: #fbfaf6;
+  box-shadow: 0 1px 3px rgba(25, 32, 25, 0.07);
+  color: var(--green-dark);
+}
+
+.transaction-side-control button.is-selected.sell-side {
+  border-color: #e4d5d1;
+  color: #8d3f37;
+}
+
 .field-group {
   position: relative;
   display: grid;
@@ -1031,6 +1178,18 @@ tbody tr:hover {
 .field-group > label {
   color: #3c423d;
   font-size: 12px;
+  font-weight: 600;
+}
+
+.field-hint {
+  margin-top: -2px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.field-hint.field-error {
+  color: var(--red);
   font-weight: 600;
 }
 
@@ -1101,6 +1260,22 @@ tbody tr:hover {
   border-radius: 7px;
   background: #fffefa;
   box-shadow: 0 15px 32px rgba(32, 39, 32, 0.14);
+}
+
+.sell-search-empty {
+  position: absolute;
+  z-index: 12;
+  top: 74px;
+  right: 0;
+  left: 0;
+  padding: 14px;
+  border: 1px solid var(--line-dark);
+  border-radius: 7px;
+  background: #fffefa;
+  box-shadow: 0 15px 32px rgba(32, 39, 32, 0.1);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .symbol-results > button {
@@ -1470,6 +1645,16 @@ tbody tr:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .holdings-view-intro {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .holdings-stats {
+    width: 100%;
+    min-width: 0;
+  }
+
   .metrics-rail {
     display: grid;
     grid-template-columns: 1.4fr 0.6fr 0.6fr 1fr;
@@ -1531,7 +1716,8 @@ tbody tr:hover {
   }
 
   .topbar,
-  .portfolio-column {
+  .portfolio-column,
+  .holdings-view {
     padding-right: 20px;
     padding-left: 20px;
   }
@@ -1626,6 +1812,26 @@ tbody tr:hover {
 
   .portfolio-column {
     padding: 25px 16px 0;
+  }
+
+  .holdings-view {
+    padding: 25px 16px 34px;
+  }
+
+  .holdings-view-intro {
+    padding-bottom: 22px;
+  }
+
+  .holdings-stats {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .holdings-stats > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .holdings-stats > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
   }
 
   .portfolio-summary {
