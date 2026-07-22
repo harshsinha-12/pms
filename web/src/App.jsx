@@ -60,6 +60,17 @@ function cx(...names) {
   return names.filter(Boolean).join(" ");
 }
 
+function InfoTooltip({ label, children }) {
+  return (
+    <span className="info-tooltip">
+      <button type="button" className="info-button" aria-label={label}>
+        <Info size={15} aria-hidden="true" />
+      </button>
+      <span className="info-tooltip-text" role="tooltip">{children}</span>
+    </span>
+  );
+}
+
 function firstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null);
 }
@@ -560,7 +571,9 @@ function PortfolioChart({ history, range, currency, usdInrRate, benchmark, onRan
           >
             <span />
           </button>
-          <Info size={16} />
+          <InfoTooltip label="About the Nifty 50 comparison">
+            Compare your portfolio&apos;s performance with the Nifty 50 benchmark.
+          </InfoTooltip>
         </label>
       </div>
       <div className="chart-canvas">
@@ -905,11 +918,21 @@ function MetricsRail({ summary, allocation }) {
       </section>
 
       <section className="headline-metric">
-        <p>XIRR <Info size={15} /></p>
+        <p>
+          XIRR
+          <InfoTooltip label="About XIRR">
+            Your annualized return, accounting for the timing and size of every cash flow.
+          </InfoTooltip>
+        </p>
         <strong>{summary.xirr.toFixed(1)}%</strong>
       </section>
       <section className="headline-metric">
-        <p>CAGR <Info size={15} /></p>
+        <p>
+          CAGR
+          <InfoTooltip label="About CAGR">
+            The smoothed annual growth rate from your portfolio&apos;s starting value to today.
+          </InfoTooltip>
+        </p>
         <strong>{summary.cagr.toFixed(1)}%</strong>
       </section>
 

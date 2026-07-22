@@ -459,8 +459,52 @@ input:focus-visible {
   white-space: nowrap;
 }
 
-.benchmark-control > svg {
+.info-tooltip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.info-button {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
   color: #767b76;
+  cursor: help;
+}
+
+.info-button:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.info-tooltip-text {
+  position: absolute;
+  z-index: 10;
+  right: 0;
+  bottom: calc(100% + 9px);
+  width: 220px;
+  padding: 9px 11px;
+  border-radius: 5px;
+  background: #193a28;
+  color: #fffdf8;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(3px);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.info-tooltip:hover .info-tooltip-text,
+.info-tooltip:focus-within .info-tooltip-text {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .switch {
@@ -952,6 +996,17 @@ tbody tr:hover {
   gap: 7px;
   color: #717671;
   font-size: 13px;
+}
+
+.headline-metric .info-tooltip-text {
+  right: auto;
+  left: 50%;
+  transform: translate(-50%, 3px);
+}
+
+.headline-metric .info-tooltip:hover .info-tooltip-text,
+.headline-metric .info-tooltip:focus-within .info-tooltip-text {
+  transform: translate(-50%, 0);
 }
 
 .headline-metric strong {
