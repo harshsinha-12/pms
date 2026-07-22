@@ -141,13 +141,7 @@ Create the Vercel project from this repository with these settings:
 - **Build Command:** `npm run build`
 - **Output Directory:** `dist/client`
 
-In Vercel **Settings → Environment Variables**, add the Railway public origin for Production and Preview:
-
-```env
-RAILWAY_API_ORIGIN=https://your-api.up.railway.app
-```
-
-Use only the HTTPS origin: no `/api` suffix, path, or trailing slash. `web/vercel.mjs` preserves the frontend's existing same-origin `/api/*` requests and proxies them to `${RAILWAY_API_ORIGIN}/api/*` on Railway.
+`web/vercel.json` preserves the frontend's existing same-origin `/api/*` requests and proxies them to `https://pms-production-dba2.up.railway.app/api/*` on Railway. No Railway URL environment variable is needed in Vercel.
 
 After Vercel creates the production deployment, copy its stable URL from **Settings → Domains**. In the Railway API service's **Variables** tab, set:
 

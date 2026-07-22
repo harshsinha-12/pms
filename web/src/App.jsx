@@ -1433,9 +1433,12 @@ export function App() {
       await reloadPortfolio();
       setLastUpdated(new Date());
       showToast("Portfolio prices and today’s snapshot are up to date.");
-    } catch {
+    } catch (error) {
       setLastUpdated(new Date());
-      showToast("Live quotes are unavailable, so the latest saved prices are still shown.", "warning");
+      showToast(
+        error?.message || "Portfolio prices could not be refreshed. The latest saved prices are still shown.",
+        "warning",
+      );
     } finally {
       setRefreshing(false);
     }

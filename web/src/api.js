@@ -11,7 +11,10 @@ async function request(path, options = {}) {
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    let message = body;
+    const contentType = response.headers.get("content-type") || "";
+    let message = contentType.includes("text/html") && response.status === 404
+      ? "The API route was not found. Check that Vercel is deploying web/vercel.json with Root Directory set to web."
+      : body;
     try {
       const parsed = JSON.parse(body);
       const detail = parsed.detail ?? parsed.message ?? parsed.error;
