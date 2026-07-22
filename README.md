@@ -143,6 +143,8 @@ Create the Vercel project from this repository with these settings:
 
 `web/vercel.json` preserves the frontend's existing same-origin `/api/*` requests and proxies them to `https://pms-production-dba2.up.railway.app/api/*` on Railway. No Railway URL environment variable is needed in Vercel.
 
+The social preview uses `web/public/og-image.png`. Enable **Automatically expose System Environment Variables** in Vercel, or set `VITE_SITE_URL=https://your-project.vercel.app`, so the production build emits an absolute Open Graph image URL. Local builds safely fall back to `/og-image.png`.
+
 After Vercel creates the production deployment, copy its stable URL from **Settings → Domains**. In the Railway API service's **Variables** tab, set:
 
 ```env
