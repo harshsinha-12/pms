@@ -999,12 +999,12 @@ function MetricsRail({ summary, allocation, sectorAllocation }) {
           <span>
             <small>Trailing P/E</small>
             <strong>{summary.trailingPe ? `${summary.trailingPe.toFixed(1)}x` : "—"}</strong>
-            <em>{summary.trailingPeCoverage.toFixed(0)}% coverage</em>
+            <em>{Number(summary.trailingPeCoverage || 0).toFixed(0)}% coverage</em>
           </span>
           <span>
             <small>Forward P/E</small>
             <strong>{summary.forwardPe ? `${summary.forwardPe.toFixed(1)}x` : "—"}</strong>
-            <em>{summary.forwardPeCoverage.toFixed(0)}% coverage</em>
+            <em>{Number(summary.forwardPeCoverage || 0).toFixed(0)}% coverage</em>
           </span>
         </div>
         <p>Calculated from aggregate implied earnings for holdings with a positive P/E.</p>
