@@ -41,6 +41,7 @@ class TransactionCreate(BaseModel):
     currency: Currency | None = None
     fx_rate_to_inr: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=8)
     name: str | None = Field(default=None, max_length=160)
+    sector: str | None = Field(default=None, max_length=120)
     asset_type: AssetType | None = None
     notes: str | None = Field(default=None, max_length=500)
 
@@ -54,6 +55,11 @@ class TransactionCreate(BaseModel):
     def ensure_timezone(cls, value: datetime) -> datetime:
         return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
+    @field_validator("sector")
+    @classmethod
+    def normalize_sector(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
 
 class TransactionUpdate(BaseModel):
     symbol: Symbol | None = None
@@ -65,6 +71,7 @@ class TransactionUpdate(BaseModel):
     currency: Currency | None = None
     fx_rate_to_inr: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=8)
     name: str | None = Field(default=None, max_length=160)
+    sector: str | None = Field(default=None, max_length=120)
     asset_type: AssetType | None = None
     notes: str | None = Field(default=None, max_length=500)
 
@@ -79,6 +86,11 @@ class TransactionUpdate(BaseModel):
         if value is None or value.tzinfo is not None:
             return value
         return value.replace(tzinfo=timezone.utc)
+
+    @field_validator("sector")
+    @classmethod
+    def normalize_sector(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
 
     @model_validator(mode="after")
     def require_a_change(self) -> "TransactionUpdate":
@@ -98,6 +110,7 @@ class Transaction(BaseModel):
     currency: Currency
     fx_rate_to_inr: Decimal
     name: str | None = None
+    sector: str | None = None
     asset_type: AssetType = AssetType.STOCK
     notes: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -112,6 +125,9 @@ class Instrument(BaseModel):
     asset_type: AssetType
     current_price: Decimal | None = None
     previous_close: Decimal | None = None
+    sector: str | None = None
+    trailing_pe: Decimal | None = None
+    forward_pe: Decimal | None = None
 
 
 class Quote(BaseModel):
@@ -121,6 +137,9 @@ class Quote(BaseModel):
     currency: Currency
     as_of: datetime
     name: str | None = None
+    sector: str | None = None
+    trailing_pe: Decimal | None = None
+    forward_pe: Decimal | None = None
     asset_type: AssetType = AssetType.STOCK
     source: str = "yahoo_finance"
 
@@ -145,6 +164,9 @@ class Holding(BaseModel):
     latest_traded_at: datetime | None = None
     symbol: str
     name: str | None = None
+    sector: str | None = None
+    trailing_pe: float | None = None
+    forward_pe: float | None = None
     asset_type: AssetType
     currency: Currency
     quantity: float
@@ -182,6 +204,10 @@ class PortfolioMetrics(BaseModel):
     absolute_return_percent: float | None = None
     xirr_percent: float | None = None
     cagr_percent: float | None = None
+    trailing_pe: float | None = None
+    forward_pe: float | None = None
+    trailing_pe_coverage_percent: float = 0
+    forward_pe_coverage_percent: float = 0
     holdings_count: int
 
 
@@ -205,6 +231,7 @@ class PortfolioSummary(BaseModel):
     allocation_by_holding: list[AllocationSlice]
     allocation_by_asset_type: list[AllocationSlice]
     allocation_by_currency: list[AllocationSlice]
+    allocation_by_sector: list[AllocationSlice]
     history: list[PortfolioSnapshot]
 
 

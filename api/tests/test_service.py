@@ -110,6 +110,49 @@ async def test_us_holdings_are_valued_in_inr(
 
 
 @pytest.mark.asyncio
+async def test_refresh_builds_sector_breakdown_and_aggregate_portfolio_pe(
+    repository: FakeRepository,
+    provider: FakeProvider,
+    settings,
+) -> None:
+    service = PortfolioService(repository, provider, settings)
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="RELIANCE.NS",
+            quantity=Decimal("1"),
+            price=Decimal("200"),
+            currency=Currency.INR,
+            sector="Industrials",
+        )
+    )
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="AAPL",
+            quantity=Decimal("1"),
+            price=Decimal("100"),
+            currency=Currency.USD,
+            fx_rate_to_inr=Decimal("80"),
+        )
+    )
+
+    refreshed = await service.refresh()
+    metrics = refreshed.summary.metrics
+    # Aggregate P/E = covered market value / aggregate implied earnings.
+    expected_trailing = (220 + 120 * 83) / (220 / 20 + (120 * 83) / 30)
+    expected_forward = (220 + 120 * 83) / (220 / 18 + (120 * 83) / 25)
+    assert metrics.trailing_pe == pytest.approx(expected_trailing)
+    assert metrics.forward_pe == pytest.approx(expected_forward)
+    assert metrics.trailing_pe_coverage_percent == 100
+    assert metrics.forward_pe_coverage_percent == 100
+    assert refreshed.summary.holdings[0].sector == "Technology"
+    assert refreshed.summary.holdings[1].sector == "Industrials"
+    assert [item.key for item in refreshed.summary.allocation_by_sector] == [
+        "Technology",
+        "Industrials",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_refresh_uses_stale_cached_quote_during_outage(
     repository: FakeRepository,
     provider: FakeProvider,

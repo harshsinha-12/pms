@@ -91,6 +91,9 @@ class FakeProvider:
                 currency=Currency.INR,
                 as_of=now,
                 name="Reliance Industries",
+                sector="Energy",
+                trailing_pe=Decimal("20"),
+                forward_pe=Decimal("18"),
             ),
             "AAPL": Quote(
                 symbol="AAPL",
@@ -99,6 +102,9 @@ class FakeProvider:
                 currency=Currency.USD,
                 as_of=now,
                 name="Apple Inc.",
+                sector="Technology",
+                trailing_pe=Decimal("30"),
+                forward_pe=Decimal("25"),
             ),
             "NIFTYBEES.NS": Quote(
                 symbol="NIFTYBEES.NS",

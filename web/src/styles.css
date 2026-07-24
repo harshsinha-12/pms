@@ -922,6 +922,37 @@ tbody tr:hover {
   padding-bottom: 30px;
 }
 
+.allocation-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.allocation-toggle {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #efeee8;
+}
+
+.allocation-toggle button {
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.allocation-toggle button.is-selected {
+  background: #fbfaf6;
+  box-shadow: 0 1px 2px rgba(25, 32, 25, 0.08);
+  color: var(--green-dark);
+}
+
 .allocation-layout {
   display: grid;
   grid-template-columns: 125px minmax(0, 1fr);
@@ -987,6 +1018,41 @@ tbody tr:hover {
 
 .headline-metric {
   padding: 24px 0 20px;
+}
+
+.valuation-metrics {
+  padding: 24px 0 21px;
+}
+
+.valuation-metrics > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 16px;
+  gap: 16px;
+}
+
+.valuation-metrics > div > span {
+  display: grid;
+  gap: 3px;
+}
+
+.valuation-metrics small,
+.valuation-metrics em,
+.valuation-metrics p {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.valuation-metrics strong {
+  font-family: var(--serif);
+  font-size: 24px;
+  font-weight: 500;
+}
+
+.valuation-metrics p {
+  margin: 14px 0 0;
+  line-height: 1.45;
 }
 
 .headline-metric p {
@@ -1496,6 +1562,15 @@ tbody tr:hover {
   gap: 14px;
 }
 
+.metadata-field {
+  margin-top: 20px;
+}
+
+.metadata-field .field-hint {
+  display: block;
+  margin-top: 7px;
+}
+
 .date-field input {
   padding-right: 8px;
 }
@@ -1804,6 +1879,10 @@ tbody tr:hover {
     padding: 24px 20px 0 0;
   }
 
+  .valuation-metrics {
+    padding: 0 20px 0 0;
+  }
+
   .cash-flow-block {
     padding: 0 0 0 0;
     border-right: 0 !important;
@@ -1848,10 +1927,6 @@ tbody tr:hover {
 
   .metrics-rail {
     grid-template-columns: 1fr 1fr;
-  }
-
-  .metrics-rail section:nth-child(2) {
-    border-right: 0;
   }
 
   .cash-flow-block {

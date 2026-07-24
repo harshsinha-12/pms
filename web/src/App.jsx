@@ -122,6 +122,11 @@ function positiveNumber(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function optionalNumber(value) {
+  const parsed = Number(value);
+  return value !== null && value !== undefined && Number.isFinite(parsed) ? parsed : null;
+}
+
 function explicitUsdInrRate(payload, summary) {
   const candidates = [
     payload.usdInrRate,
@@ -184,6 +189,9 @@ function normalizeHolding(raw, index = 0) {
     market,
     assetClass: assetClassFor(assetType, currency),
     assetType: String(assetType || "STOCK").toUpperCase().includes("ETF") ? "ETF" : "STOCK",
+    sector: firstDefined(raw.sector, raw.industry_sector, null),
+    trailingPe: optionalNumber(firstDefined(raw.trailingPe, raw.trailing_pe)),
+    forwardPe: optionalNumber(firstDefined(raw.forwardPe, raw.forward_pe)),
     currency,
     quantity: Number(firstDefined(raw.quantity, raw.units, 0)),
     averagePrice: Number(
@@ -213,6 +221,7 @@ function normalizeTransactionForEdit(raw) {
     currency: firstDefined(raw.currency, "INR"),
     name: firstDefined(raw.name, raw.company_name, ""),
     assetType: firstDefined(raw.asset_type, raw.assetType, "STOCK"),
+    sector: firstDefined(raw.sector, ""),
   };
 }
 
@@ -285,6 +294,18 @@ function normalizeSummary(raw = {}) {
     ),
     xirr: Number(firstDefined(raw.xirr, raw.xirr_percent, 0)),
     cagr: Number(firstDefined(raw.cagr, raw.cagr_percent, 0)),
+    trailingPe: optionalNumber(firstDefined(raw.trailingPe, raw.trailing_pe)),
+    forwardPe: optionalNumber(firstDefined(raw.forwardPe, raw.forward_pe)),
+    trailingPeCoverage: Number(firstDefined(
+      raw.trailingPeCoverage,
+      raw.trailing_pe_coverage_percent,
+      0,
+    )),
+    forwardPeCoverage: Number(firstDefined(
+      raw.forwardPeCoverage,
+      raw.forward_pe_coverage_percent,
+      0,
+    )),
     invested: Number(
       firstDefined(
         raw.invested,
@@ -311,6 +332,11 @@ function unpackPortfolio(response) {
   const rawHoldings = firstDefined(payload.holdings, payload.positions, []);
   const rawSummary = firstDefined(payload.summary, payload.metrics, payload);
   const rawHistory = firstDefined(payload.history, payload.portfolio_history, payload.daily_values, []);
+  const rawSectorAllocation = firstDefined(
+    payload.allocationBySector,
+    payload.allocation_by_sector,
+    [],
+  );
   const normalizedHoldings = Array.isArray(rawHoldings)
     ? rawHoldings.map((holding, index) => normalizeHolding(holding, index))
     : [];
@@ -338,6 +364,23 @@ function unpackPortfolio(response) {
     "US Stocks": "#b5d4b7",
     "US ETFs": "#8ebc98",
   };
+  const sectorColors = ["#11662f", "#4f8c5d", "#8ebc98", "#b89252", "#5b63de", "#8f6b53", "#9fa69e"];
+  const derivedSectorGroups = normalizedHoldings.reduce((groups, holding) => {
+    const sector = holding.sector || "Unclassified";
+    groups[sector] = (groups[sector] || 0) + valueInInr(holding, holding.currentPrice, usdInrRate);
+    return groups;
+  }, {});
+  const sectorAllocation = Array.isArray(rawSectorAllocation) && rawSectorAllocation.length
+    ? rawSectorAllocation.map((item, index) => ({
+        name: firstDefined(item.name, item.key, "Unclassified"),
+        value: Number(firstDefined(item.percentage, item.value, 0)),
+        color: sectorColors[index % sectorColors.length],
+      }))
+    : Object.entries(derivedSectorGroups).map(([name, value], index) => ({
+        name,
+        value: allocationTotal ? (value / allocationTotal) * 100 : 0,
+        color: sectorColors[index % sectorColors.length],
+      }));
 
   return {
     holdings: normalizedHoldings,
@@ -358,6 +401,7 @@ function unpackPortfolio(response) {
       value: allocationTotal ? (value / allocationTotal) * 100 : 0,
       color: allocationColors[name] || demoAllocation[index % demoAllocation.length]?.color || "#d7dbd2",
     })),
+    sectorAllocation,
     lastUpdated: firstDefined(payload.lastUpdated, payload.last_updated, payload.as_of),
     usdInrRate,
     usdInrStatus,
@@ -696,6 +740,7 @@ function HoldingsTable({
               <th>Qty</th>
               <th>Avg price</th>
               <th>Current price</th>
+              <th>P/E T / F</th>
               <th>Invested</th>
               <th>Value</th>
               <th>U / R P&amp;L</th>
@@ -727,10 +772,21 @@ function HoldingsTable({
                       </div>
                     </div>
                   </td>
-                  <td>{holding.market}</td>
+                  <td>
+                    <div className="value-stack">
+                      <span>{holding.market}</span>
+                      <small>{holding.sector || "Sector unclassified"}</small>
+                    </div>
+                  </td>
                   <td>{holding.quantity.toLocaleString("en-IN")}</td>
                   <td>{formatMoney(holding.averagePrice, holding.currency, 2)}</td>
                   <td>{formatMoney(holding.currentPrice, holding.currency, 2)}</td>
+                  <td>
+                    <div className="value-stack">
+                      <span>{holding.trailingPe ? `${holding.trailingPe.toFixed(1)}x` : "—"}</span>
+                      <small>{holding.forwardPe ? `${holding.forwardPe.toFixed(1)}x fwd` : "— fwd"}</small>
+                    </div>
+                  </td>
                   <td>
                     <div className="value-stack">
                       <span>{formatMoney(nativeInvested, holding.currency, holding.currency === "USD" ? 2 : 0)}</span>
@@ -872,18 +928,38 @@ function HoldingsView({
   );
 }
 
-function MetricsRail({ summary, allocation }) {
+function MetricsRail({ summary, allocation, sectorAllocation }) {
+  const [allocationMode, setAllocationMode] = useState("sector");
+  const visibleAllocation = allocationMode === "sector" ? sectorAllocation : allocation;
   return (
     <aside className="metrics-rail" id="analytics-section" aria-label="Portfolio analytics">
       <section className="allocation-block">
-        <h2>Portfolio allocation</h2>
+        <div className="allocation-heading">
+          <h2>Portfolio allocation</h2>
+          <div className="allocation-toggle" role="group" aria-label="Allocation breakdown">
+            <button
+              type="button"
+              className={allocationMode === "sector" ? "is-selected" : ""}
+              onClick={() => setAllocationMode("sector")}
+            >
+              Sector
+            </button>
+            <button
+              type="button"
+              className={allocationMode === "asset" ? "is-selected" : ""}
+              onClick={() => setAllocationMode("asset")}
+            >
+              Asset
+            </button>
+          </div>
+        </div>
         <div className="allocation-layout">
           <div className="donut-wrap">
-            {allocation.length > 0 ? (
+            {visibleAllocation.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
-                    data={allocation}
+                    data={visibleAllocation}
                     dataKey="value"
                     nameKey="name"
                     innerRadius="67%"
@@ -893,7 +969,7 @@ function MetricsRail({ summary, allocation }) {
                     strokeWidth={2}
                     isAnimationActive={false}
                   >
-                    {allocation.map((item) => <Cell key={item.name} fill={item.color} />)}
+                    {visibleAllocation.map((item) => <Cell key={item.name} fill={item.color} />)}
                   </Pie>
                   <Tooltip formatter={(value) => `${Number(value).toFixed(1)}%`} />
                 </PieChart>
@@ -906,7 +982,7 @@ function MetricsRail({ summary, allocation }) {
             <span>{formatMoney(summary.totalValue, "INR")}</span>
           </div>
           <div className="allocation-legend">
-            {allocation.map((item) => (
+            {visibleAllocation.map((item) => (
               <div key={item.name}>
                 <i style={{ backgroundColor: item.color }} />
                 <span>{item.name}</span>
@@ -915,6 +991,23 @@ function MetricsRail({ summary, allocation }) {
             ))}
           </div>
         </div>
+      </section>
+
+      <section className="valuation-metrics">
+        <h2>Portfolio valuation</h2>
+        <div>
+          <span>
+            <small>Trailing P/E</small>
+            <strong>{summary.trailingPe ? `${summary.trailingPe.toFixed(1)}x` : "—"}</strong>
+            <em>{summary.trailingPeCoverage.toFixed(0)}% coverage</em>
+          </span>
+          <span>
+            <small>Forward P/E</small>
+            <strong>{summary.forwardPe ? `${summary.forwardPe.toFixed(1)}x` : "—"}</strong>
+            <em>{summary.forwardPeCoverage.toFixed(0)}% coverage</em>
+          </span>
+        </div>
+        <p>Calculated from aggregate implied earnings for holdings with a positive P/E.</p>
       </section>
 
       <section className="headline-metric">
@@ -1056,6 +1149,7 @@ function normalizeSearchResult(item) {
     currency,
     price: Number(firstDefined(item.price, item.current_price, item.regular_market_price, 0)),
     availableQuantity: positiveNumber(firstDefined(item.availableQuantity, item.available_quantity, item.quantity)),
+    sector: firstDefined(item.sector, ""),
   };
 }
 
@@ -1082,6 +1176,7 @@ function TransactionDrawer({
     market: holding?.market ?? "NSE",
     assetClass: holding?.assetClass ?? "Indian Stocks",
     assetType: editTransaction?.assetType || holding?.assetType || "STOCK",
+    sector: editTransaction?.sector || holding?.sector || "",
     currency: editTransaction?.currency ?? holding?.currency ?? "INR",
     quantity: editTransaction?.quantity ?? "",
     averagePrice: editTransaction?.price ?? holding?.currentPrice ?? "",
@@ -1164,6 +1259,7 @@ function TransactionDrawer({
         quantity: "",
         averagePrice: "",
         currentPrice: "",
+        sector: "",
       }));
     }
   }
@@ -1179,6 +1275,7 @@ function TransactionDrawer({
       name: normalized.name,
       market: normalized.market,
       assetClass: normalized.assetClass,
+      sector: normalized.sector,
       currency: normalized.currency,
       currentPrice: roundedPrice,
       averagePrice: normalized.symbol === current.symbol && current.averagePrice
@@ -1261,7 +1358,12 @@ function TransactionDrawer({
                 if (isEdit) return;
                 setSelectedSymbol(null);
                 setSearchOpen(true);
-                setForm((current) => ({ ...current, symbol: event.target.value.toUpperCase(), name: "" }));
+                setForm((current) => ({
+                  ...current,
+                  symbol: event.target.value.toUpperCase(),
+                  name: "",
+                  sector: "",
+                }));
               }}
               placeholder={side === "BUY" ? "Try RELIANCE.NS or AAPL" : "Search your open positions"}
               autoComplete="off"
@@ -1382,6 +1484,23 @@ function TransactionDrawer({
           </div>
         </div>
 
+        <div className="field-group metadata-field">
+          <label htmlFor="sector">Sector</label>
+          <div className="field-with-icon">
+            <ChartPieSlice size={18} />
+            <input
+              id="sector"
+              value={form.sector}
+              onChange={(event) => setForm((current) => ({ ...current, sector: event.target.value }))}
+              placeholder="Fetched from Yahoo Finance, or enter manually"
+              maxLength={120}
+            />
+          </div>
+          <small className="field-hint">
+            Leave blank to use Yahoo Finance classification. A manual value takes priority.
+          </small>
+        </div>
+
         <div className="cost-preview">
           <span>{side === "BUY" ? "Purchase value" : "Estimated proceeds"}</span>
           <strong>{formatMoney(transactionValue, form.currency, form.currency === "USD" ? 2 : 0)}</strong>
@@ -1488,6 +1607,7 @@ export function App() {
   const [summary, setSummary] = useState(demoSummary);
   const [history, setHistory] = useState(() => buildDemoHistory());
   const [allocation, setAllocation] = useState(demoAllocation);
+  const [sectorAllocation, setSectorAllocation] = useState([]);
   const [transactions, setTransactions] = useState(demoTransactions);
   const [activeView, setActiveView] = useState("overview");
   const [currency, setCurrency] = useState("INR");
@@ -1512,6 +1632,7 @@ export function App() {
     setHoldings(next.holdings);
     setHistory(next.history);
     setAllocation(next.allocation);
+    setSectorAllocation(next.sectorAllocation);
     setSummary(next.summary);
     setUsdInrRate(next.usdInrRate);
     setUsdInrStatus(next.usdInrStatus);
@@ -1681,6 +1802,7 @@ export function App() {
       name: form.name,
       asset_type: form.assetType || (form.assetClass.includes("ETF") ? "ETF" : "STOCK"),
       currency: form.currency,
+      sector: form.sector || null,
     };
 
     try {
@@ -1700,6 +1822,7 @@ export function App() {
       quantity: form.quantity,
       price: form.averagePrice,
       traded_at: `${form.date}T12:00:00+05:30`,
+      sector: form.sector || null,
     };
 
     try {
@@ -1757,7 +1880,11 @@ export function App() {
                 onShowAll={() => setActiveView("holdings")}
               />
             </div>
-            <MetricsRail summary={summary} allocation={allocation} />
+            <MetricsRail
+              summary={summary}
+              allocation={allocation}
+              sectorAllocation={sectorAllocation}
+            />
           </div>
         ) : (
           <HoldingsView

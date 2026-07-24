@@ -47,6 +47,7 @@ class _Position:
     currency: Currency
     asset_type: AssetType
     name: str | None
+    sector: str | None
     quantity: Decimal = ZERO
     cost_native: Decimal = ZERO
     cost_inr: Decimal = ZERO
@@ -92,6 +93,9 @@ class PortfolioService:
                 update={
                     "current_price": quotes[item.symbol].price,
                     "previous_close": quotes[item.symbol].previous_close,
+                    "sector": quotes[item.symbol].sector,
+                    "trailing_pe": quotes[item.symbol].trailing_pe,
+                    "forward_pe": quotes[item.symbol].forward_pe,
                 }
             )
             if item.symbol in quotes
@@ -133,6 +137,8 @@ class PortfolioService:
                     candidate["asset_type"] = None
                 if "name" not in updates:
                     candidate["name"] = None
+                if "sector" not in updates:
+                    candidate["sector"] = None
             if (symbol_changed or currency_changed) and "fx_rate_to_inr" not in updates:
                 candidate["fx_rate_to_inr"] = None
 
@@ -147,6 +153,7 @@ class PortfolioService:
                     currency=candidate["currency"],
                     fx_rate_to_inr=candidate["fx_rate_to_inr"],
                     name=candidate["name"],
+                    sector=candidate["sector"],
                     asset_type=candidate["asset_type"],
                     notes=candidate["notes"],
                 )
@@ -204,6 +211,7 @@ class PortfolioService:
 
         if symbols:
             try:
+                cached_quotes = await self._repository.get_quotes(symbols)
                 quotes = await self._provider.get_quotes(symbols)
                 if quotes:
                     # Ledger metadata is more reliable than suffix inference for Indian ETFs.
@@ -211,11 +219,27 @@ class PortfolioService:
                     for symbol, quote in quotes.items():
                         position = ledger.positions.get(symbol)
                         if position:
+                            cached = cached_quotes.get(symbol)
                             quote = quote.model_copy(
                                 update={
                                     "currency": position.currency,
                                     "asset_type": position.asset_type,
                                     "name": position.name or quote.name,
+                                    "sector": (
+                                        position.sector
+                                        or quote.sector
+                                        or (cached.sector if cached else None)
+                                    ),
+                                    "trailing_pe": (
+                                        quote.trailing_pe
+                                        if quote.trailing_pe is not None
+                                        else (cached.trailing_pe if cached else None)
+                                    ),
+                                    "forward_pe": (
+                                        quote.forward_pe
+                                        if quote.forward_pe is not None
+                                        else (cached.forward_pe if cached else None)
+                                    ),
                                 }
                             )
                         enriched.append(quote)
@@ -323,6 +347,7 @@ class PortfolioService:
             currency=currency,
             fx_rate_to_inr=fx_rate,
             name=payload.name or (quote.name if quote else None),
+            sector=payload.sector or (quote.sector if quote else None),
             asset_type=asset_type,
             notes=payload.notes,
         )
@@ -365,6 +390,7 @@ class PortfolioService:
                     currency=transaction.currency,
                     asset_type=transaction.asset_type,
                     name=transaction.name,
+                    sector=transaction.sector,
                 )
                 positions[transaction.symbol] = position
             elif position.currency != transaction.currency:
@@ -373,6 +399,7 @@ class PortfolioService:
                 )
 
             position.name = transaction.name or position.name
+            position.sector = transaction.sector or position.sector
             position.asset_type = transaction.asset_type
             position.latest_price = transaction.price
             position.latest_fx = transaction.fx_rate_to_inr
@@ -489,6 +516,17 @@ class PortfolioService:
                     latest_traded_at=position.latest_trade_at,
                     symbol=symbol,
                     name=position.name,
+                    sector=position.sector or (quote.sector if quote else None),
+                    trailing_pe=(
+                        float(quote.trailing_pe)
+                        if quote and quote.trailing_pe is not None
+                        else None
+                    ),
+                    forward_pe=(
+                        float(quote.forward_pe)
+                        if quote and quote.forward_pe is not None
+                        else None
+                    ),
                     asset_type=position.asset_type,
                     currency=position.currency,
                     quantity=float(position.quantity),
@@ -533,6 +571,16 @@ class PortfolioService:
             else 0
         )
         cagr = calculate_cagr(float(ledger.net_invested_inr), float(total_value_inr), elapsed_years)
+        trailing_pe, trailing_pe_coverage = self._portfolio_pe(
+            holdings,
+            "trailing_pe",
+            float(total_value_inr),
+        )
+        forward_pe, forward_pe_coverage = self._portfolio_pe(
+            holdings,
+            "forward_pe",
+            float(total_value_inr),
+        )
         metrics = PortfolioMetrics(
             current_value_inr=float(total_value_inr),
             cost_basis_inr=float(total_cost_inr),
@@ -548,6 +596,10 @@ class PortfolioService:
             ),
             xirr_percent=xirr * 100 if xirr is not None else None,
             cagr_percent=cagr * 100 if cagr is not None else None,
+            trailing_pe=trailing_pe,
+            forward_pe=forward_pe,
+            trailing_pe_coverage_percent=trailing_pe_coverage,
+            forward_pe_coverage_percent=forward_pe_coverage,
             holdings_count=len(holdings),
         )
         return PortfolioSummary(
@@ -564,6 +616,10 @@ class PortfolioService:
             ),
             allocation_by_currency=self._grouped_allocation(
                 holdings, "currency", float(total_value_inr)
+            ),
+            allocation_by_sector=self._sector_allocation(
+                holdings,
+                float(total_value_inr),
             ),
             history=await self._repository.list_snapshots() if include_history else [],
         )
@@ -592,6 +648,35 @@ class PortfolioService:
             key = raw.value if hasattr(raw, "value") else str(raw)
             grouped[key] += holding.market_value_inr
         return cls._allocation(list(grouped.items()), total)
+
+    @classmethod
+    def _sector_allocation(
+        cls,
+        holdings: list[Holding],
+        total: float,
+    ) -> list[AllocationSlice]:
+        grouped: defaultdict[str, float] = defaultdict(float)
+        for holding in holdings:
+            grouped[holding.sector or "Unclassified"] += holding.market_value_inr
+        return cls._allocation(list(grouped.items()), total)
+
+    @staticmethod
+    def _portfolio_pe(
+        holdings: list[Holding],
+        field: str,
+        total_value: float,
+    ) -> tuple[float | None, float]:
+        covered_value = 0.0
+        implied_earnings = 0.0
+        for holding in holdings:
+            pe = getattr(holding, field)
+            if pe is None or pe <= 0:
+                continue
+            covered_value += holding.market_value_inr
+            implied_earnings += holding.market_value_inr / pe
+        coverage = covered_value / total_value * 100 if total_value > 0 else 0.0
+        portfolio_pe = covered_value / implied_earnings if implied_earnings > 0 else None
+        return portfolio_pe, coverage
 
     def _snapshot_from_summary(self, summary: PortfolioSummary) -> PortfolioSnapshot:
         local_date = summary.as_of.astimezone(ZoneInfo(self._settings.portfolio_timezone)).date()

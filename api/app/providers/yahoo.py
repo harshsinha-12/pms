@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -37,6 +38,22 @@ def _decimal(value: Any) -> Decimal | None:
 
 def _currency_for_symbol(symbol: str) -> Currency:
     return Currency.INR if symbol.upper().endswith(INDIAN_SUFFIXES) else Currency.USD
+
+
+def _profile_sync(symbol: str) -> tuple[str, dict[str, Any]]:
+    """Fetch valuation and classification fields without failing the price refresh."""
+
+    try:
+        info = yf.Ticker(symbol).info or {}
+    except Exception:
+        info = {}
+    return symbol, {
+        "name": info.get("longName") or info.get("shortName"),
+        "sector": info.get("sector") or info.get("sectorDisp"),
+        "trailing_pe": _decimal(info.get("trailingPE")),
+        "forward_pe": _decimal(info.get("forwardPE")),
+        "quote_type": str(info.get("quoteType", "")).upper(),
+    }
 
 
 def _close_series(data: Any, symbol: str) -> Any | None:
@@ -154,6 +171,13 @@ class YahooFinanceProvider:
             timeout=15,
         )
         now = datetime.now(timezone.utc)
+        profiles: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=min(6, len(symbols))) as executor:
+            futures = [executor.submit(_profile_sync, symbol) for symbol in symbols]
+            for future in as_completed(futures):
+                symbol, profile = future.result()
+                profiles[symbol] = profile
+
         quotes: dict[str, Quote] = {}
         for symbol in symbols:
             series = _close_series(data, symbol)
@@ -166,12 +190,22 @@ class YahooFinanceProvider:
             previous = _decimal(closes.iloc[-2]) if len(closes) > 1 else None
             if price is None or price <= 0:
                 continue
+            profile = profiles.get(symbol, {})
             quotes[symbol] = Quote(
                 symbol=symbol,
                 price=price,
                 previous_close=previous,
                 currency=_currency_for_symbol(symbol),
                 as_of=now,
+                name=profile.get("name"),
+                sector=profile.get("sector"),
+                trailing_pe=profile.get("trailing_pe"),
+                forward_pe=profile.get("forward_pe"),
+                asset_type=(
+                    AssetType.ETF
+                    if profile.get("quote_type") == "ETF"
+                    else AssetType.STOCK
+                ),
             )
         return quotes
 
