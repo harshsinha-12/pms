@@ -53,6 +53,7 @@ import {
   demoSymbols,
   demoTransactions,
 } from "./demoData.js";
+import { screenAveragingCandidates } from "./averaging.js";
 
 const RANGE_DAYS = { "1M": 31, "6M": 183, "1Y": 366, All: Infinity };
 
@@ -872,6 +873,125 @@ function HoldingsTable({
   );
 }
 
+function AveragingCandidates({
+  holdings,
+  usdInrRate,
+  compact = false,
+  onBuy,
+  onShowAll,
+}) {
+  const analysis = useMemo(
+    () => screenAveragingCandidates(holdings, usdInrRate),
+    [holdings, usdInrRate],
+  );
+  const visibleCandidates = compact
+    ? analysis.candidates.slice(0, 3)
+    : analysis.candidates;
+  const hiddenCount = analysis.candidates.length - visibleCandidates.length;
+
+  return (
+    <section className="averaging-section" aria-labelledby="averaging-title">
+      <div className="averaging-heading">
+        <div>
+          <p className="eyebrow">Calculated review list</p>
+          <h2 id="averaging-title">
+            Might wish to average
+            <InfoTooltip label="How averaging candidates are filtered">
+              A holding appears when it is at least {analysis.minimumDiscountPercent}% below
+              its weighted average cost and no heavier than an equal-weight position.
+            </InfoTooltip>
+          </h2>
+          <p>
+            At least {analysis.minimumDiscountPercent.toFixed(0)}% below average cost and no
+            more than {analysis.equalWeightPercent.toFixed(1)}% of this portfolio.
+          </p>
+        </div>
+        <span>{analysis.candidates.length} to review</span>
+      </div>
+
+      {visibleCandidates.length ? (
+        <div className="averaging-grid">
+          {visibleCandidates.map((holding) => {
+            const peTrend = holding.trailingPe > 0 && holding.forwardPe > 0
+              ? ((holding.forwardPe / holding.trailingPe) - 1) * 100
+              : null;
+
+            return (
+              <article className="averaging-card" key={holding.id || holding.symbol}>
+                <header>
+                  <div className="asset-cell">
+                    <AssetMark holding={holding} />
+                    <div>
+                      <strong>{holding.name}</strong>
+                      <span>{holding.symbol} · {holding.sector || "Unclassified"}</span>
+                    </div>
+                  </div>
+                  <span className="cost-gap">{holding.discountPercent.toFixed(1)}% below cost</span>
+                </header>
+
+                <dl>
+                  <div>
+                    <dt>Recovery to avg</dt>
+                    <dd>+{holding.recoveryPercent.toFixed(1)}%</dd>
+                  </div>
+                  <div>
+                    <dt>Portfolio weight</dt>
+                    <dd>{holding.allocationPercent.toFixed(1)}%</dd>
+                  </div>
+                  <div>
+                    <dt>Forward P/E</dt>
+                    <dd>{holding.forwardPe > 0 ? `${holding.forwardPe.toFixed(1)}x` : "—"}</dd>
+                    <small>
+                      {peTrend === null
+                        ? "Not used in filter"
+                        : `${peTrend > 0 ? "+" : ""}${peTrend.toFixed(1)}% vs trailing`}
+                    </small>
+                  </div>
+                </dl>
+
+                <footer>
+                  <span>
+                    Now {formatMoney(holding.currentPrice, holding.currency, 2)}
+                    {" · "}
+                    Avg {formatMoney(holding.averagePrice, holding.currency, 2)}
+                    {holding.quoteIsStale ? " · cached price" : ""}
+                  </span>
+                  <button type="button" onClick={() => onBuy(holding)}>
+                    <Plus size={14} /> Add units
+                  </button>
+                </footer>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="averaging-empty">
+          <ChartLineUp size={25} weight="duotone" />
+          <div>
+            <strong>
+              {holdings.length ? "No holdings meet both rules today" : "No positions to screen yet"}
+            </strong>
+            <span>
+              {holdings.length
+                ? "A lower price alone is not enough; the position must also be at or below equal weight."
+                : "Add a holding and its average-cost comparison will appear here."}
+            </span>
+          </div>
+        </div>
+      )}
+
+      <footer className="averaging-note">
+        <span>Screening aid only—not investment advice. Recheck the business thesis before adding.</span>
+        {hiddenCount > 0 && onShowAll ? (
+          <button type="button" onClick={onShowAll}>
+            Review all {analysis.candidates.length} <ArrowUpRight size={13} />
+          </button>
+        ) : null}
+      </footer>
+    </section>
+  );
+}
+
 function HoldingsView({
   holdings,
   summary,
@@ -923,6 +1043,11 @@ function HoldingsView({
         onBuy={onBuy}
         onEdit={onEdit}
         onSell={onSell}
+      />
+      <AveragingCandidates
+        holdings={holdings}
+        usdInrRate={usdInrRate}
+        onBuy={onBuy}
       />
     </div>
   );
@@ -1877,6 +2002,13 @@ export function App() {
                 onBuy={(holding) => openTransactionDrawer("BUY", holding)}
                 onEdit={openEditHolding}
                 onSell={(holding) => openTransactionDrawer("SELL", holding)}
+                onShowAll={() => setActiveView("holdings")}
+              />
+              <AveragingCandidates
+                holdings={holdings}
+                usdInrRate={usdInrRate}
+                compact
+                onBuy={(holding) => openTransactionDrawer("BUY", holding)}
                 onShowAll={() => setActiveView("holdings")}
               />
             </div>
