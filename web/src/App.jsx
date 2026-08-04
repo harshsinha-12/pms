@@ -54,6 +54,7 @@ import {
   demoTransactions,
 } from "./demoData.js";
 import { screenAveragingCandidates } from "./averaging.js";
+import { buildPortfolioChartData, getPortfolioChartDomain } from "./chart.js";
 
 const RANGE_DAYS = { "1M": 31, "6M": 183, "1Y": 366, All: Infinity };
 
@@ -574,20 +575,12 @@ function ChartTooltip({ active, payload, label, currency }) {
   );
 }
 
-function PortfolioChart({ history, range, currency, usdInrRate, benchmark, onRangeChange, onBenchmarkChange }) {
+function PortfolioChart({ history, currentValue, range, currency, usdInrRate, benchmark, onRangeChange, onBenchmarkChange }) {
   const chartData = useMemo(() => {
-    const days = RANGE_DAYS[range];
-    const visible = Number.isFinite(days) ? history.slice(-days) : history;
-    return visible.map((point) => ({
-      ...point,
-      displayValue: currency === "USD" && usdInrRate ? point.value / usdInrRate : point.value,
-      displayBenchmark: currency === "USD" && usdInrRate ? point.benchmark / usdInrRate : point.benchmark,
-    }));
-  }, [currency, history, range, usdInrRate]);
+    return buildPortfolioChartData({ history, range, currency, usdInrRate, currentValue });
+  }, [currency, currentValue, history, range, usdInrRate]);
 
-  const maxValue = Math.max(...chartData.map((point) => point.displayValue), 1);
-  const chartInterval = currency === "USD" ? 10000 : 1000000;
-  const domain = range === "All" ? [0, Math.ceil(maxValue / chartInterval) * chartInterval] : ["auto", "auto"];
+  const domain = getPortfolioChartDomain(chartData, range);
 
   return (
     <section className="chart-section" aria-label="Portfolio history">
@@ -1985,6 +1978,7 @@ export function App() {
               />
               <PortfolioChart
                 history={history}
+                currentValue={summary.totalValue}
                 range={range}
                 currency={currency}
                 usdInrRate={usdInrRate}
