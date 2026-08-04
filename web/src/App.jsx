@@ -684,6 +684,42 @@ function AssetMark({ holding }) {
   return <InstrumentMark symbol={holding.symbol} color={holding.color} />;
 }
 
+const HOLDING_SORT_DEFAULTS = {
+  asset: "ascending",
+  market: "ascending",
+  quantity: "descending",
+  averagePrice: "descending",
+  currentPrice: "descending",
+  pe: "descending",
+  invested: "descending",
+  value: "descending",
+  pnl: "descending",
+  allocation: "descending",
+};
+
+function SortableHoldingHeader({ column, label, sort, onSort }) {
+  const isActive = sort.column === column;
+  const nextDirection = isActive && sort.direction === "ascending"
+    ? "descending"
+    : isActive ? "ascending" : HOLDING_SORT_DEFAULTS[column];
+
+  return (
+    <th aria-sort={isActive ? sort.direction : "none"}>
+      <button
+        type="button"
+        className={cx("sort-button", isActive && "is-active")}
+        onClick={() => onSort(column)}
+        aria-label={`Sort by ${label}, ${nextDirection}`}
+      >
+        <span>{label}</span>
+        <span className="sort-indicator" aria-hidden="true">
+          {isActive ? sort.direction === "ascending" ? "↑" : "↓" : "↕"}
+        </span>
+      </button>
+    </th>
+  );
+}
+
 function HoldingsTable({
   holdings,
   query,
@@ -697,14 +733,71 @@ function HoldingsTable({
   onShowAll,
 }) {
   const [menuOpen, setMenuOpen] = useState(null);
-  const filtered = holdings.filter((holding) =>
-    `${holding.name} ${holding.symbol}`.toLowerCase().includes(query.toLowerCase()),
-  );
-  const visibleHoldings = compact && !query ? filtered.slice(0, 5) : filtered;
+  const [sort, setSort] = useState({ column: null, direction: null });
   const portfolioValue = holdings.reduce(
     (sum, item) => sum + valueInInr(item, item.currentPrice, usdInrRate),
     0,
   );
+  const filtered = useMemo(
+    () => holdings.filter((holding) =>
+      `${holding.name} ${holding.symbol}`.toLowerCase().includes(query.toLowerCase()),
+    ),
+    [holdings, query],
+  );
+  const sortedHoldings = useMemo(() => {
+    if (!sort.column) return filtered;
+
+    function sortValue(holding) {
+      const invested = valueInInr(holding, holding.averagePrice, usdInrRate);
+      const current = valueInInr(holding, holding.currentPrice, usdInrRate);
+      switch (sort.column) {
+        case "asset": return `${holding.name} ${holding.symbol}`.toLowerCase();
+        case "market": return `${holding.market} ${holding.sector || ""}`.toLowerCase();
+        case "quantity": return holding.quantity;
+        case "averagePrice": return holding.averagePrice;
+        case "currentPrice": return holding.currentPrice;
+        case "pe": return holding.trailingPe;
+        case "invested": return invested;
+        case "value":
+        case "allocation": return current;
+        case "pnl": return Number.isFinite(holding.unrealizedPnlInr)
+          ? holding.unrealizedPnlInr
+          : current - invested;
+        default: return null;
+      }
+    }
+
+    return filtered
+      .map((holding, index) => ({ holding, index }))
+      .sort((left, right) => {
+        const leftValue = sortValue(left.holding);
+        const rightValue = sortValue(right.holding);
+        const leftMissing = leftValue === null || leftValue === undefined || Number.isNaN(leftValue);
+        const rightMissing = rightValue === null || rightValue === undefined || Number.isNaN(rightValue);
+        if (leftMissing || rightMissing) {
+          if (leftMissing && rightMissing) return left.index - right.index;
+          return leftMissing ? 1 : -1;
+        }
+
+        const comparison = typeof leftValue === "string"
+          ? leftValue.localeCompare(rightValue)
+          : Number(leftValue) - Number(rightValue);
+        return comparison === 0
+          ? left.index - right.index
+          : comparison * (sort.direction === "ascending" ? 1 : -1);
+      })
+      .map(({ holding }) => holding);
+  }, [filtered, sort, usdInrRate]);
+  const visibleHoldings = compact && !query ? sortedHoldings.slice(0, 5) : sortedHoldings;
+
+  function handleSort(column) {
+    setSort((current) => ({
+      column,
+      direction: current.column === column
+        ? current.direction === "ascending" ? "descending" : "ascending"
+        : HOLDING_SORT_DEFAULTS[column],
+    }));
+  }
 
   return (
     <section className="holdings-section" id="holdings-section" aria-labelledby="holdings-title">
@@ -729,16 +822,16 @@ function HoldingsTable({
         <table>
           <thead>
             <tr>
-              <th>Asset</th>
-              <th>Market</th>
-              <th>Qty</th>
-              <th>Avg price</th>
-              <th>Current price</th>
-              <th>P/E T / F</th>
-              <th>Invested</th>
-              <th>Value</th>
-              <th>U / R P&amp;L</th>
-              <th>Allocation</th>
+              <SortableHoldingHeader column="asset" label="Asset" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="market" label="Market" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="quantity" label="Qty" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="averagePrice" label="Avg price" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="currentPrice" label="Current price" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="pe" label="P/E T / F" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="invested" label="Invested" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="value" label="Value" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="pnl" label="U / R P&L" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="allocation" label="Allocation" sort={sort} onSort={handleSort} />
               <th aria-label="Actions" />
             </tr>
           </thead>
