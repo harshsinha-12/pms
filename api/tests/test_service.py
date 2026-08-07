@@ -72,6 +72,7 @@ async def test_weighted_average_realized_and_unrealized_pnl(
     assert holding.average_price == 150
     assert holding.current_price == 220
     assert holding.cost_basis_native == 2250
+    assert holding.cost_basis_inr == 2250
     assert holding.realized_pnl_native == 150
     assert holding.unrealized_pnl_native == 1050
     assert holding.latest_transaction_id is not None
@@ -82,6 +83,10 @@ async def test_weighted_average_realized_and_unrealized_pnl(
     assert history[-1].date == datetime.now(timezone.utc).astimezone(
         ZoneInfo("Asia/Kolkata")
     ).date()
+    latest_position = next(point for point in history[-1].holdings if point.symbol == "RELIANCE.NS")
+    assert latest_position.quantity == 15
+    assert latest_position.cost_basis_inr == 2250
+    assert latest_position.market_value_inr == 3300
 
 
 @pytest.mark.asyncio
@@ -107,6 +112,37 @@ async def test_us_holdings_are_valued_in_inr(
     assert holding.market_value_native == 240
     assert holding.market_value_inr == 19_920
     assert holding.unrealized_pnl_inr == 3_920
+
+
+@pytest.mark.asyncio
+async def test_refresh_backfills_legacy_snapshots_with_holding_values(
+    repository: FakeRepository,
+    provider: FakeProvider,
+    settings,
+) -> None:
+    service = PortfolioService(repository, provider, settings)
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="RELIANCE.NS",
+            quantity=Decimal("2"),
+            price=Decimal("100"),
+            currency=Currency.INR,
+            traded_at=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+    )
+    repository.snapshots = {
+        key: snapshot.model_copy(update={"holdings": []})
+        for key, snapshot in repository.snapshots.items()
+    }
+
+    refreshed = await service.refresh()
+
+    assert refreshed.summary.history
+    assert all(
+        snapshot.holdings
+        for snapshot in refreshed.summary.history
+        if snapshot.total_value_inr > 0
+    )
 
 
 @pytest.mark.asyncio

@@ -174,6 +174,7 @@ class Holding(BaseModel):
     current_price: float
     previous_close: float | None = None
     cost_basis_native: float
+    cost_basis_inr: float
     market_value_native: float
     market_value_inr: float
     unrealized_pnl_native: float
@@ -211,6 +212,14 @@ class PortfolioMetrics(BaseModel):
     holdings_count: int
 
 
+class HoldingSnapshot(BaseModel):
+    symbol: str
+    quantity: float
+    market_value_inr: float
+    cost_basis_inr: float
+    unrealized_pnl_inr: float
+
+
 class PortfolioSnapshot(BaseModel):
     date: date
     total_value_inr: float
@@ -219,6 +228,7 @@ class PortfolioSnapshot(BaseModel):
     unrealized_pnl_inr: float
     realized_pnl_inr: float
     captured_at: datetime
+    holdings: list[HoldingSnapshot] = Field(default_factory=list)
 
 
 class PortfolioSummary(BaseModel):

@@ -20,6 +20,7 @@ from ..models import (
     ExchangeRateQuote,
     FxRate,
     Holding,
+    HoldingSnapshot,
     Instrument,
     PortfolioMetrics,
     PortfolioSnapshot,
@@ -260,7 +261,19 @@ class PortfolioService:
                 warnings.append(f"USD/INR rate is unavailable: {exc}")
 
         summary = await self._build_summary(include_history=False)
-        await self._repository.save_snapshot(self._snapshot_from_summary(summary))
+        existing_snapshots = await self._repository.list_snapshots()
+        needs_holding_backfill = any(
+            snapshot.total_value_inr > 0 and not snapshot.holdings
+            for snapshot in existing_snapshots
+        )
+        if needs_holding_backfill:
+            try:
+                await self._rebuild_daily_history()
+            except MarketDataError as exc:
+                warnings.append(f"Per-holding history backfill is unavailable: {exc}")
+                await self._repository.save_snapshot(self._snapshot_from_summary(summary))
+        else:
+            await self._repository.save_snapshot(self._snapshot_from_summary(summary))
         summary = summary.model_copy(update={"history": await self._repository.list_snapshots()})
         stale_symbols = sorted(item.symbol for item in summary.holdings if item.quote_is_stale)
         return RefreshResponse(
@@ -548,6 +561,7 @@ class PortfolioService:
                     ),
                     price_as_of=quote_as_of,
                     quote_is_stale=stale,
+                    cost_basis_inr=float(position.cost_inr),
                 )
             )
 
@@ -688,6 +702,16 @@ class PortfolioService:
             unrealized_pnl_inr=summary.metrics.unrealized_pnl_inr,
             realized_pnl_inr=summary.metrics.realized_pnl_inr,
             captured_at=summary.as_of,
+            holdings=[
+                HoldingSnapshot(
+                    symbol=holding.symbol,
+                    quantity=holding.quantity,
+                    market_value_inr=holding.market_value_inr,
+                    cost_basis_inr=holding.market_value_inr - holding.unrealized_pnl_inr,
+                    unrealized_pnl_inr=holding.unrealized_pnl_inr,
+                )
+                for holding in summary.holdings
+            ],
         )
 
     async def _save_daily_snapshot(self) -> None:
@@ -753,6 +777,7 @@ class PortfolioService:
             ledger = self._build_ledger(day_transactions)
             total_value = ZERO
             total_cost = ZERO
+            holding_snapshots: list[HoldingSnapshot] = []
             total_realized = sum(
                 (position.realized_inr for position in ledger.positions.values()),
                 ZERO,
@@ -764,8 +789,18 @@ class PortfolioService:
                 fx_rate = ONE
                 if position.currency == Currency.USD:
                     fx_rate = last_fx or position.latest_fx
-                total_value += position.quantity * price * fx_rate
+                market_value = position.quantity * price * fx_rate
+                total_value += market_value
                 total_cost += position.cost_inr
+                holding_snapshots.append(
+                    HoldingSnapshot(
+                        symbol=symbol,
+                        quantity=float(position.quantity),
+                        market_value_inr=float(market_value),
+                        cost_basis_inr=float(position.cost_inr),
+                        unrealized_pnl_inr=float(market_value - position.cost_inr),
+                    )
+                )
 
             captured_local = datetime.combine(
                 valuation_date,
@@ -781,6 +816,7 @@ class PortfolioService:
                     unrealized_pnl_inr=float(total_value - total_cost),
                     realized_pnl_inr=float(total_realized),
                     captured_at=captured_local.astimezone(timezone.utc),
+                    holdings=holding_snapshots,
                 )
             )
 

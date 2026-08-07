@@ -17,10 +17,12 @@ export function buildPortfolioChartData({
   currency,
   usdInrRate,
   currentValue,
+  currentInvested,
   now = new Date(),
 }) {
   const points = Array.isArray(history) ? history.map((point) => ({ ...point })) : [];
   const numericCurrentValue = Number(currentValue);
+  const numericCurrentInvested = Number(currentInvested);
 
   if (
     Number.isFinite(numericCurrentValue)
@@ -31,8 +33,14 @@ export function buildPortfolioChartData({
     const latest = points.at(-1);
     if (latest?.date === today) {
       latest.value = numericCurrentValue;
+      if (Number.isFinite(numericCurrentInvested)) latest.invested = numericCurrentInvested;
     } else {
-      points.push({ date: today, value: numericCurrentValue, benchmark: latest?.benchmark || 0 });
+      points.push({
+        date: today,
+        value: numericCurrentValue,
+        invested: Number.isFinite(numericCurrentInvested) ? numericCurrentInvested : 0,
+        benchmark: latest?.benchmark || 0,
+      });
     }
   }
 
@@ -41,15 +49,57 @@ export function buildPortfolioChartData({
   return visible.map((point) => ({
     ...point,
     displayValue: currency === "USD" && usdInrRate ? point.value / usdInrRate : point.value,
+    displayInvested: currency === "USD" && usdInrRate
+      ? point.invested / usdInrRate
+      : point.invested,
     displayBenchmark: currency === "USD" && usdInrRate ? point.benchmark / usdInrRate : point.benchmark,
   }));
+}
+
+export function buildHoldingChartData({
+  history,
+  holding,
+  range,
+  now = new Date(),
+}) {
+  if (!holding?.symbol) return [];
+
+  const points = (Array.isArray(history) ? history : [])
+    .map((point) => {
+      const position = point.holdings?.find((item) => item.symbol === holding.symbol);
+      return position ? {
+        date: point.date,
+        value: Number(position.value),
+        invested: Number(position.invested),
+      } : null;
+    })
+    .filter(Boolean);
+
+  const currentValue = Number(holding.marketValueInr);
+  const currentInvested = Number(holding.costBasisInr);
+  if (Number.isFinite(currentValue) && Number.isFinite(currentInvested)) {
+    const today = dateKeyInTimeZone(now);
+    const latest = points.at(-1);
+    if (latest?.date === today) {
+      latest.value = currentValue;
+      latest.invested = currentInvested;
+    } else {
+      points.push({ date: today, value: currentValue, invested: currentInvested });
+    }
+  }
+
+  const days = RANGE_DAYS[range];
+  return Number.isFinite(days) ? points.slice(-days) : points;
 }
 
 export function getPortfolioChartDomain(chartData, range) {
   if (range !== "All") return ["auto", "auto"];
 
   const maxValue = Math.max(
-    ...chartData.map((point) => Number(point.displayValue)).filter(Number.isFinite),
+    ...chartData.flatMap((point) => [
+      Number(point.displayValue ?? point.value),
+      Number(point.displayInvested ?? point.invested),
+    ]).filter(Number.isFinite),
     1,
   );
   const roughStep = maxValue / 4;

@@ -54,7 +54,12 @@ import {
   demoTransactions,
 } from "./demoData.js";
 import { screenAveragingCandidates } from "./averaging.js";
-import { buildPortfolioChartData, getPortfolioChartDomain } from "./chart.js";
+import {
+  buildHoldingChartData,
+  buildPortfolioChartData,
+  getPortfolioChartDomain,
+} from "./chart.js";
+import { screenUnderperformingHoldings } from "./underperformance.js";
 
 const RANGE_DAYS = { "1M": 31, "6M": 183, "1Y": 366, All: Infinity };
 
@@ -394,9 +399,34 @@ function unpackPortfolio(response) {
             value: Number(
               firstDefined(point.value, point.portfolio_value, point.total_value, point.total_value_inr, 0),
             ),
+            invested: Number(firstDefined(
+              point.invested,
+              point.cost_basis,
+              point.cost_basis_inr,
+              point.net_invested_inr,
+              0,
+            )),
             benchmark: Number(firstDefined(point.benchmark, point.benchmark_value, 0)),
+            holdings: Array.isArray(point.holdings)
+              ? point.holdings.map((holding) => ({
+                  symbol: firstDefined(holding.symbol, holding.ticker),
+                  quantity: Number(firstDefined(holding.quantity, 0)),
+                  value: Number(firstDefined(
+                    holding.value,
+                    holding.market_value,
+                    holding.market_value_inr,
+                    0,
+                  )),
+                  invested: Number(firstDefined(
+                    holding.invested,
+                    holding.cost_basis,
+                    holding.cost_basis_inr,
+                    0,
+                  )),
+                }))
+              : [],
           }))
-          .filter((point) => point.date && point.value)
+          .filter((point) => point.date && (point.value || point.invested))
       : [],
     allocation: Object.entries(groupedAllocation).map(([name, value], index) => ({
       name,
@@ -564,21 +594,30 @@ function PortfolioSummary({ summary, currency, usdInrRate, onCurrencyChange }) {
 function ChartTooltip({ active, payload, label, currency }) {
   if (!active || !payload?.length) return null;
   const portfolioValue = payload.find((item) => item.dataKey === "displayValue")?.value;
+  const investedValue = payload.find((item) => item.dataKey === "displayInvested")?.value;
   const benchmarkValue = payload.find((item) => item.dataKey === "displayBenchmark")?.value;
 
   return (
     <div className="chart-tooltip">
       <span>{fullDate(label)}</span>
       <strong>{formatMoney(portfolioValue, currency)}</strong>
+      {Number.isFinite(investedValue) ? <small>Invested · {formatMoney(investedValue, currency)}</small> : null}
       {benchmarkValue ? <small>Nifty 50 · {formatMoney(benchmarkValue, currency)}</small> : null}
     </div>
   );
 }
 
-function PortfolioChart({ history, currentValue, range, currency, usdInrRate, benchmark, onRangeChange, onBenchmarkChange }) {
+function PortfolioChart({ history, currentValue, currentInvested, range, currency, usdInrRate, benchmark, onRangeChange, onBenchmarkChange }) {
   const chartData = useMemo(() => {
-    return buildPortfolioChartData({ history, range, currency, usdInrRate, currentValue });
-  }, [currency, currentValue, history, range, usdInrRate]);
+    return buildPortfolioChartData({
+      history,
+      range,
+      currency,
+      usdInrRate,
+      currentValue,
+      currentInvested,
+    });
+  }, [currency, currentInvested, currentValue, history, range, usdInrRate]);
 
   const domain = getPortfolioChartDomain(chartData, range);
 
@@ -598,21 +637,27 @@ function PortfolioChart({ history, currentValue, range, currency, usdInrRate, be
             </button>
           ))}
         </div>
-        <label className="benchmark-control">
-          <span>vs Nifty 50</span>
-          <button
-            className={cx("switch", benchmark && "is-on")}
-            type="button"
-            role="switch"
-            aria-checked={benchmark}
-            onClick={() => onBenchmarkChange(!benchmark)}
-          >
-            <span />
-          </button>
-          <InfoTooltip label="About the Nifty 50 comparison">
-            Compare your portfolio&apos;s performance with the Nifty 50 benchmark.
-          </InfoTooltip>
-        </label>
+        <div className="chart-toolbar-actions">
+          <div className="chart-legend" aria-label="Chart series">
+            <span><i className="current-series" />Current value</span>
+            <span><i className="invested-series" />Invested</span>
+          </div>
+          <label className="benchmark-control">
+            <span>vs Nifty 50</span>
+            <button
+              className={cx("switch", benchmark && "is-on")}
+              type="button"
+              role="switch"
+              aria-checked={benchmark}
+              onClick={() => onBenchmarkChange(!benchmark)}
+            >
+              <span />
+            </button>
+            <InfoTooltip label="About the Nifty 50 comparison">
+              Compare your portfolio&apos;s performance with the Nifty 50 benchmark.
+            </InfoTooltip>
+          </label>
+        </div>
       </div>
       <div className="chart-canvas">
         {chartData.length === 0 ? (
@@ -645,7 +690,7 @@ function PortfolioChart({ history, currentValue, range, currency, usdInrRate, be
               tickLine={false}
               tick={{ fill: "#656a64", fontSize: 11 }}
               width={44}
-              tickFormatter={(value) => formatIndianCompact(value, currency, usdInrRate).replace(currency === "INR" ? "₹" : "$", "")}
+              tickFormatter={(value) => formatIndianCompact(value, currency).replace(currency === "INR" ? "₹" : "$", "")}
             />
             <Tooltip
               cursor={{ stroke: "#8d978e", strokeDasharray: "3 3" }}
@@ -658,6 +703,16 @@ function PortfolioChart({ history, currentValue, range, currency, usdInrRate, be
               strokeWidth={2}
               fill="url(#portfolioFill)"
               activeDot={{ r: 4, fill: "#176a35", stroke: "#fff", strokeWidth: 2 }}
+              isAnimationActive={false}
+            />
+            <Line
+              type="stepAfter"
+              dataKey="displayInvested"
+              stroke="#a77931"
+              strokeWidth={1.7}
+              strokeDasharray="5 4"
+              dot={false}
+              activeDot={{ r: 3, fill: "#a77931", stroke: "#fff", strokeWidth: 2 }}
               isAnimationActive={false}
             />
             {benchmark ? (
@@ -730,19 +785,30 @@ function HoldingsTable({
   onBuy,
   onEdit,
   onSell,
+  onAnalyze,
   onShowAll,
 }) {
   const [menuOpen, setMenuOpen] = useState(null);
   const [sort, setSort] = useState({ column: null, direction: null });
+  const [performanceFilter, setPerformanceFilter] = useState("all");
+  const underperformance = useMemo(
+    () => screenUnderperformingHoldings(holdings, usdInrRate),
+    [holdings, usdInrRate],
+  );
+  const underperformingSymbols = useMemo(
+    () => new Set(underperformance.candidates.map((holding) => holding.symbol)),
+    [underperformance],
+  );
   const portfolioValue = holdings.reduce(
     (sum, item) => sum + valueInInr(item, item.currentPrice, usdInrRate),
     0,
   );
   const filtered = useMemo(
-    () => holdings.filter((holding) =>
-      `${holding.name} ${holding.symbol}`.toLowerCase().includes(query.toLowerCase()),
-    ),
-    [holdings, query],
+    () => holdings.filter((holding) => (
+      (performanceFilter === "all" || underperformingSymbols.has(holding.symbol))
+      && `${holding.name} ${holding.symbol}`.toLowerCase().includes(query.toLowerCase())
+    )),
+    [holdings, performanceFilter, query, underperformingSymbols],
   );
   const sortedHoldings = useMemo(() => {
     if (!sort.column) return filtered;
@@ -816,7 +882,27 @@ function HoldingsTable({
             </button>
           ) : null}
         </div>
-        <span id="holdings-title">{filtered.length} holdings</span>
+        <div className="holdings-heading-meta">
+          <div className="holding-filter" role="group" aria-label="Holding performance filter">
+            <button
+              type="button"
+              className={performanceFilter === "all" ? "is-selected" : ""}
+              onClick={() => setPerformanceFilter("all")}
+              aria-pressed={performanceFilter === "all"}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              className={performanceFilter === "underperforming" ? "is-selected" : ""}
+              onClick={() => setPerformanceFilter("underperforming")}
+              aria-pressed={performanceFilter === "underperforming"}
+            >
+              Underperforming {underperformance.candidates.length}
+            </button>
+          </div>
+          <span id="holdings-title">{filtered.length} holdings</span>
+        </div>
       </div>
       <div className="table-shell">
         <table>
@@ -909,6 +995,9 @@ function HoldingsTable({
                       </button>
                       {menuOpen === holding.id ? (
                         <div className="action-menu">
+                          <button type="button" onClick={() => { setMenuOpen(null); onAnalyze(holding); }}>
+                            <ChartLineUp size={16} /> View value history
+                          </button>
                           <button type="button" onClick={() => { setMenuOpen(null); onEdit(holding); }}>
                             <PencilSimple size={16} /> Edit latest transaction
                           </button>
@@ -1078,6 +1167,111 @@ function AveragingCandidates({
   );
 }
 
+function UnderperformanceReview({
+  holdings,
+  usdInrRate,
+  compact = false,
+  onAnalyze,
+  onShowAll,
+}) {
+  const analysis = useMemo(
+    () => screenUnderperformingHoldings(holdings, usdInrRate),
+    [holdings, usdInrRate],
+  );
+  const visibleCandidates = compact ? analysis.candidates.slice(0, 3) : analysis.candidates;
+  const hiddenCount = analysis.candidates.length - visibleCandidates.length;
+
+  return (
+    <section className="underperformance-section" aria-labelledby="underperformance-title">
+      <div className="underperformance-heading">
+        <div>
+          <p className="eyebrow">Capital-at-risk screen</p>
+          <h2 id="underperformance-title">
+            Underperforming positions
+            <InfoTooltip label="How underperforming positions are filtered">
+              A position must be at least {analysis.minimumLossPercent}% below invested value and
+              represent either half an equal-weight position or {analysis.minimumLossContributionPercent}%
+              of the portfolio&apos;s unrealized losses.
+            </InfoTooltip>
+          </h2>
+          <p>
+            Filters out small, immaterial losses so review time goes to positions affecting capital.
+          </p>
+        </div>
+        <span>{analysis.candidates.length} flagged</span>
+      </div>
+
+      {visibleCandidates.length ? (
+        <div className="underperformance-grid">
+          {visibleCandidates.map((holding) => (
+            <article className="underperformance-card" key={holding.id || holding.symbol}>
+              <header>
+                <div className="asset-cell">
+                  <AssetMark holding={holding} />
+                  <div>
+                    <strong>{holding.name}</strong>
+                    <span>{holding.symbol} · {holding.sector || "Unclassified"}</span>
+                  </div>
+                </div>
+                <span className="review-path">{holding.reviewPath}</span>
+              </header>
+              <div className="loss-summary">
+                <strong>{formatSignedMoney(-holding.lossInr, "INR")}</strong>
+                <span>{holding.lossPercent.toFixed(1)}% below invested</span>
+              </div>
+              <dl>
+                <div>
+                  <dt>Invested</dt>
+                  <dd>{formatMoney(holding.investedValueInr, "INR")}</dd>
+                </div>
+                <div>
+                  <dt>Current</dt>
+                  <dd>{formatMoney(holding.currentValueInr, "INR")}</dd>
+                </div>
+                <div>
+                  <dt>Loss contribution</dt>
+                  <dd>{holding.lossContributionPercent.toFixed(1)}%</dd>
+                </div>
+                <div>
+                  <dt>Recovery to cost</dt>
+                  <dd>+{holding.recoveryPercent.toFixed(1)}%</dd>
+                </div>
+              </dl>
+              <footer>
+                <span>{holding.investedWeightPercent.toFixed(1)}% of invested capital</span>
+                <button type="button" onClick={() => onAnalyze(holding)}>
+                  Review chart <ArrowUpRight size={13} />
+                </button>
+              </footer>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="underperformance-empty">
+          <TrendUp size={25} weight="duotone" />
+          <div>
+            <strong>{holdings.length ? "No material underperformers today" : "No positions to screen yet"}</strong>
+            <span>
+              {holdings.length
+                ? "Losses below the materiality thresholds remain visible in the holdings table."
+                : "Add holdings to evaluate cost gap and capital impact."}
+            </span>
+          </div>
+        </div>
+      )}
+
+      <footer className="underperformance-note">
+        <span>Decision aid only. Price loss does not prove a broken thesis or justify averaging.</span>
+        {hiddenCount > 0 && onShowAll ? (
+          <button type="button" onClick={onShowAll}>
+            Review all {analysis.candidates.length} <ArrowUpRight size={13} />
+          </button>
+        ) : null}
+      </footer>
+    </section>
+  );
+}
+
 function HoldingsView({
   holdings,
   summary,
@@ -1088,6 +1282,7 @@ function HoldingsView({
   onBuy,
   onEdit,
   onSell,
+  onAnalyze,
 }) {
   const unrealizedClass = summary.unrealizedGain < 0
     ? "negative"
@@ -1129,6 +1324,12 @@ function HoldingsView({
         onBuy={onBuy}
         onEdit={onEdit}
         onSell={onSell}
+        onAnalyze={onAnalyze}
+      />
+      <UnderperformanceReview
+        holdings={holdings}
+        usdInrRate={usdInrRate}
+        onAnalyze={onAnalyze}
       />
       <AveragingCandidates
         holdings={holdings}
@@ -1303,6 +1504,163 @@ function DrawerShell({ title, subtitle, onClose, children, width = "standard" })
         {children}
       </aside>
     </div>
+  );
+}
+
+function HoldingChartTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  const current = payload.find((item) => item.dataKey === "value")?.value;
+  const invested = payload.find((item) => item.dataKey === "invested")?.value;
+  return (
+    <div className="chart-tooltip">
+      <span>{fullDate(label)}</span>
+      <strong>{formatMoney(current, "INR")}</strong>
+      <small>Invested · {formatMoney(invested, "INR")}</small>
+    </div>
+  );
+}
+
+function HoldingAnalysisDrawer({ holding, history, usdInrRate, onClose, onBuy, onSell }) {
+  const [range, setRange] = useState("1Y");
+  const chartData = useMemo(
+    () => buildHoldingChartData({ history, holding, range }),
+    [history, holding, range],
+  );
+  const invested = valueInInr(holding, holding.averagePrice, usdInrRate);
+  const current = valueInInr(holding, holding.currentPrice, usdInrRate);
+  const pnl = current - invested;
+  const returnPercent = invested ? (pnl / invested) * 100 : 0;
+  const recoveryPercent = pnl < 0 && current ? ((invested - current) / current) * 100 : 0;
+  const domain = getPortfolioChartDomain(chartData, range);
+
+  return (
+    <DrawerShell
+      title={holding.name}
+      subtitle={`${holding.symbol} · invested value versus market value in INR`}
+      onClose={onClose}
+      width="wide"
+    >
+      <div className="holding-analysis">
+        <div className="holding-analysis-summary">
+          <div>
+            <span>Current value</span>
+            <strong>{formatMoney(current, "INR")}</strong>
+          </div>
+          <div>
+            <span>Invested value</span>
+            <strong>{formatMoney(invested, "INR")}</strong>
+          </div>
+          <div>
+            <span>Unrealized P&amp;L</span>
+            <strong className={pnl < 0 ? "negative" : pnl > 0 ? "positive" : "neutral"}>
+              {formatSignedMoney(pnl, "INR")} ({returnPercent.toFixed(1)}%)
+            </strong>
+          </div>
+        </div>
+
+        <section className="holding-history-card" aria-label={`${holding.name} value history`}>
+          <div className="holding-history-toolbar">
+            <div className="chart-legend" aria-label="Chart series">
+              <span><i className="current-series" />Current value</span>
+              <span><i className="invested-series" />Invested</span>
+            </div>
+            <div className="range-tabs compact-range" role="group" aria-label="Holding chart date range">
+              {Object.keys(RANGE_DAYS).map((item) => (
+                <button
+                  type="button"
+                  key={item}
+                  className={range === item ? "is-selected" : ""}
+                  onClick={() => setRange(item)}
+                  aria-pressed={range === item}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="holding-chart-canvas">
+            {chartData.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={chartData} margin={{ top: 10, right: 4, bottom: 0, left: 0 }}>
+                  <defs>
+                    <linearGradient id="holdingValueFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#83b985" stopOpacity={0.25} />
+                      <stop offset="95%" stopColor="#83b985" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid vertical={false} stroke="#d9ddd4" strokeDasharray="2 3" />
+                  <XAxis
+                    dataKey="date"
+                    axisLine={{ stroke: "#cbd0c7" }}
+                    tickLine={false}
+                    tick={{ fill: "#656a64", fontSize: 10 }}
+                    minTickGap={35}
+                    tickFormatter={shortDate}
+                  />
+                  <YAxis
+                    domain={domain}
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fill: "#656a64", fontSize: 10 }}
+                    width={43}
+                    tickFormatter={(value) => formatIndianCompact(value).replace("₹", "")}
+                  />
+                  <Tooltip content={<HoldingChartTooltip />} />
+                  <Area
+                    type="monotone"
+                    dataKey="value"
+                    stroke="#176a35"
+                    strokeWidth={2}
+                    fill="url(#holdingValueFill)"
+                    activeDot={{ r: 4, fill: "#176a35", stroke: "#fff", strokeWidth: 2 }}
+                    isAnimationActive={false}
+                  />
+                  <Line
+                    type="stepAfter"
+                    dataKey="invested"
+                    stroke="#a77931"
+                    strokeWidth={1.7}
+                    strokeDasharray="5 4"
+                    dot={false}
+                    activeDot={{ r: 3, fill: "#a77931", stroke: "#fff", strokeWidth: 2 }}
+                    isAnimationActive={false}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="chart-empty">
+                <ChartLineUp size={25} weight="duotone" />
+                <strong>Historical values are not available yet</strong>
+                <span>Refresh prices once to backfill this holding&apos;s daily history.</span>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="decision-checklist">
+          <div>
+            <p className="eyebrow">Before deciding</p>
+            <h3>{pnl < 0 ? `${recoveryPercent.toFixed(1)}% recovery needed to reach cost` : "Position is above invested value"}</h3>
+          </div>
+          <ul>
+            <li><Check size={15} /> Recheck whether the original business thesis still holds.</li>
+            <li><Check size={15} /> Compare position weight with the risk you are willing to carry.</li>
+            <li><Check size={15} /> Review earnings, cash flow, valuation, and the reason for the drawdown.</li>
+            <li><Check size={15} /> Consider taxes, liquidity, and opportunity cost before exiting or adding.</li>
+          </ul>
+        </section>
+
+        <div className="holding-analysis-actions">
+          <button className="secondary-button" type="button" onClick={() => onSell(holding)}>
+            <ArrowUpRight size={15} /> Record sell
+          </button>
+          <button className="primary-button" type="button" onClick={() => onBuy(holding)}>
+            <Plus size={15} /> Add units
+          </button>
+        </div>
+        <p className="analysis-disclaimer">These calculations describe price and position impact; they are not investment advice.</p>
+      </div>
+    </DrawerShell>
   );
 }
 
@@ -1831,6 +2189,7 @@ export function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [drawer, setDrawer] = useState(null);
   const [transactionContext, setTransactionContext] = useState(null);
+  const [analysisHolding, setAnalysisHolding] = useState(null);
   const [toast, setToast] = useState(null);
   const editLoadRequest = useRef(0);
 
@@ -1880,6 +2239,7 @@ export function App() {
           editLoadRequest.current += 1;
           setTransactionContext(null);
         }
+        if (drawer === "holding-analysis") setAnalysisHolding(null);
       }
     }
     document.body.classList.add("drawer-open");
@@ -1954,8 +2314,19 @@ export function App() {
 
   function openTransactionDrawer(side = "BUY", holding = null) {
     editLoadRequest.current += 1;
+    setAnalysisHolding(null);
     setTransactionContext({ mode: "create", side, holding });
     setDrawer("transaction");
+  }
+
+  function openHoldingAnalysis(holding) {
+    setAnalysisHolding(holding);
+    setDrawer("holding-analysis");
+  }
+
+  function closeHoldingAnalysis() {
+    setDrawer(null);
+    setAnalysisHolding(null);
   }
 
   function closeTransactionDrawer() {
@@ -2072,6 +2443,7 @@ export function App() {
               <PortfolioChart
                 history={history}
                 currentValue={summary.totalValue}
+                currentInvested={summary.invested}
                 range={range}
                 currency={currency}
                 usdInrRate={usdInrRate}
@@ -2089,6 +2461,14 @@ export function App() {
                 onBuy={(holding) => openTransactionDrawer("BUY", holding)}
                 onEdit={openEditHolding}
                 onSell={(holding) => openTransactionDrawer("SELL", holding)}
+                onAnalyze={openHoldingAnalysis}
+                onShowAll={() => setActiveView("holdings")}
+              />
+              <UnderperformanceReview
+                holdings={holdings}
+                usdInrRate={usdInrRate}
+                compact
+                onAnalyze={openHoldingAnalysis}
                 onShowAll={() => setActiveView("holdings")}
               />
               <AveragingCandidates
@@ -2116,6 +2496,7 @@ export function App() {
             onBuy={(holding) => openTransactionDrawer("BUY", holding)}
             onEdit={openEditHolding}
             onSell={(holding) => openTransactionDrawer("SELL", holding)}
+            onAnalyze={openHoldingAnalysis}
           />
         )}
       </main>
@@ -2147,6 +2528,16 @@ export function App() {
       ) : null}
       {drawer === "transactions" ? (
         <TransactionsDrawer transactions={transactions} onClose={() => setDrawer(null)} />
+      ) : null}
+      {drawer === "holding-analysis" && analysisHolding ? (
+        <HoldingAnalysisDrawer
+          holding={holdings.find((item) => item.symbol === analysisHolding.symbol) || analysisHolding}
+          history={history}
+          usdInrRate={usdInrRate}
+          onClose={closeHoldingAnalysis}
+          onBuy={(holding) => openTransactionDrawer("BUY", holding)}
+          onSell={(holding) => openTransactionDrawer("SELL", holding)}
+        />
       ) : null}
       {drawer === "settings" ? (
         <SettingsDrawer

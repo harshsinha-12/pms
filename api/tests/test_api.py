@@ -59,6 +59,7 @@ def test_api_contract_and_crud(settings) -> None:
         assert portfolio.json()["usd_inr_rate"]["source"] == "yahoo_finance"
         assert portfolio.json()["metrics"]["holdings_count"] == 1
         assert portfolio.json()["holdings"][0]["current_price"] == 220
+        assert portfolio.json()["history"][-1]["holdings"][0]["symbol"] == "RELIANCE.NS"
 
         deleted = client.delete(f"/api/transactions/{transaction_id}")
         assert deleted.status_code == 204
