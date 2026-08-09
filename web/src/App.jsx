@@ -1034,7 +1034,14 @@ function HoldingsTable({
                     <div className="asset-cell">
                       <AssetMark holding={holding} />
                       <div>
-                        <strong>{holding.name}</strong>
+                        <button
+                          type="button"
+                          className="holding-history-link"
+                          onClick={() => onAnalyze(holding)}
+                          aria-label={`View value history for ${holding.name}`}
+                        >
+                          {holding.name}
+                        </button>
                         <span>{holding.symbol}</span>
                       </div>
                     </div>

@@ -911,6 +911,34 @@ tbody tr:hover {
   text-overflow: ellipsis;
 }
 
+.holding-history-link {
+  display: block;
+  max-width: 148px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 2px;
+  background: transparent;
+  color: #222622;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 140ms ease, text-decoration-color 140ms ease;
+}
+
+.holding-history-link:hover,
+.holding-history-link:focus-visible {
+  color: var(--green-dark);
+  text-decoration-color: currentColor;
+}
+
 .asset-cell span,
 .value-stack small {
   color: #777c77;
