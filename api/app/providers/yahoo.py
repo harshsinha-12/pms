@@ -72,6 +72,25 @@ def _close_series(data: Any, symbol: str) -> Any | None:
     return None
 
 
+def _history_points(data: Any, symbol: str) -> dict[date, Decimal]:
+    series = _close_series(data, symbol)
+    if series is None:
+        return {}
+
+    points: dict[date, Decimal] = {}
+    for raw_date, raw_value in series.dropna().items():
+        value = _decimal(raw_value)
+        if value is None or value <= 0:
+            continue
+        point_date = (
+            raw_date.date()
+            if hasattr(raw_date, "date")
+            else date.fromisoformat(str(raw_date)[:10])
+        )
+        points[point_date] = value
+    return points
+
+
 class YahooFinanceProvider:
     """Async facade over yfinance's blocking APIs."""
 
@@ -255,16 +274,24 @@ class YahooFinanceProvider:
         )
         result: dict[str, dict[date, Decimal]] = {}
         for symbol in symbols:
-            series = _close_series(data, symbol)
-            if series is None:
-                continue
-            points: dict[date, Decimal] = {}
-            for raw_date, raw_value in series.dropna().items():
-                value = _decimal(raw_value)
-                if value is None or value <= 0:
-                    continue
-                point_date = raw_date.date() if hasattr(raw_date, "date") else date.fromisoformat(str(raw_date)[:10])
-                points[point_date] = value
+            points = _history_points(data, symbol)
+            if not points:
+                # yfinance 0.2.66 can return an empty frame for ^NSEI when
+                # repair=True raises a read-only array error internally.
+                fallback_data = yf.download(
+                    tickers=[symbol],
+                    start=start.isoformat(),
+                    end=(date.today() + timedelta(days=1)).isoformat(),
+                    interval="1d",
+                    group_by="ticker",
+                    auto_adjust=False,
+                    actions=False,
+                    progress=False,
+                    repair=False,
+                    threads=False,
+                    timeout=int(timeout_seconds),
+                )
+                points = _history_points(fallback_data, symbol)
             if points:
                 result[symbol] = points
         return result
