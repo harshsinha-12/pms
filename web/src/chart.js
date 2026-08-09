@@ -18,11 +18,13 @@ export function buildPortfolioChartData({
   usdInrRate,
   currentValue,
   currentInvested,
+  currentNetInvested,
   now = new Date(),
 }) {
   const points = Array.isArray(history) ? history.map((point) => ({ ...point })) : [];
   const numericCurrentValue = Number(currentValue);
   const numericCurrentInvested = Number(currentInvested);
+  const numericCurrentNetInvested = Number(currentNetInvested);
 
   if (
     Number.isFinite(numericCurrentValue)
@@ -31,29 +33,78 @@ export function buildPortfolioChartData({
   ) {
     const today = dateKeyInTimeZone(now);
     const latest = points.at(-1);
+    const latestBenchmark = [...points]
+      .reverse()
+      .map((point) => Number(point.benchmark))
+      .find((value) => Number.isFinite(value) && value > 0);
     if (latest?.date === today) {
       latest.value = numericCurrentValue;
       if (Number.isFinite(numericCurrentInvested)) latest.invested = numericCurrentInvested;
+      if (Number.isFinite(numericCurrentNetInvested)) latest.netInvested = numericCurrentNetInvested;
     } else {
       points.push({
         date: today,
         value: numericCurrentValue,
         invested: Number.isFinite(numericCurrentInvested) ? numericCurrentInvested : 0,
-        benchmark: latest?.benchmark || 0,
+        netInvested: Number.isFinite(numericCurrentNetInvested)
+          ? numericCurrentNetInvested
+          : numericCurrentInvested,
+        benchmark: latestBenchmark ?? null,
       });
     }
   }
 
   const days = RANGE_DAYS[range];
-  const visible = Number.isFinite(days) ? points.slice(-days) : points;
-  return visible.map((point) => ({
-    ...point,
-    displayValue: currency === "USD" && usdInrRate ? point.value / usdInrRate : point.value,
-    displayInvested: currency === "USD" && usdInrRate
-      ? point.invested / usdInrRate
-      : point.invested,
-    displayBenchmark: currency === "USD" && usdInrRate ? point.benchmark / usdInrRate : point.benchmark,
-  }));
+  let lastBenchmark = null;
+  const normalized = points.map((point) => {
+    const benchmark = Number(point.benchmark);
+    const netInvested = Number(point.netInvested);
+    if (Number.isFinite(benchmark) && benchmark > 0) lastBenchmark = benchmark;
+    return {
+      ...point,
+      benchmark: lastBenchmark,
+      netInvested: Number.isFinite(netInvested) ? netInvested : Number(point.invested),
+    };
+  });
+  const visible = Number.isFinite(days) ? normalized.slice(-days) : normalized;
+  const baseBenchmark = visible
+    .map((point) => Number(point.benchmark))
+    .find((value) => Number.isFinite(value) && value > 0);
+  let cumulativePortfolioFactor = 1;
+
+  return visible.map((point, index) => {
+    if (index > 0) {
+      const previous = visible[index - 1];
+      const previousValue = Number(previous.value);
+      const currentValueAtPoint = Number(point.value);
+      const cashFlow = Number(point.netInvested) - Number(previous.netInvested);
+      if (previousValue > 0 && Number.isFinite(currentValueAtPoint) && Number.isFinite(cashFlow)) {
+        const dailyFactor = (currentValueAtPoint - cashFlow) / previousValue;
+        if (Number.isFinite(dailyFactor) && dailyFactor > 0) {
+          cumulativePortfolioFactor *= dailyFactor;
+        }
+      }
+    }
+
+    const benchmarkValue = Number(point.benchmark);
+    const benchmarkReturn = Number.isFinite(baseBenchmark)
+      && Number.isFinite(benchmarkValue)
+      && benchmarkValue > 0
+      ? ((benchmarkValue / baseBenchmark) - 1) * 100
+      : null;
+    const portfolioReturn = (cumulativePortfolioFactor - 1) * 100;
+
+    return {
+      ...point,
+      displayValue: currency === "USD" && usdInrRate ? point.value / usdInrRate : point.value,
+      displayInvested: currency === "USD" && usdInrRate
+        ? point.invested / usdInrRate
+        : point.invested,
+      displayPortfolioReturn: portfolioReturn,
+      displayBenchmarkReturn: benchmarkReturn,
+      relativeReturn: Number.isFinite(benchmarkReturn) ? portfolioReturn - benchmarkReturn : null,
+    };
+  });
 }
 
 export function buildHoldingChartData({
@@ -109,4 +160,25 @@ export function getPortfolioChartDomain(chartData, range) {
   const step = niceMultiplier * magnitude;
 
   return [0, Math.ceil(maxValue / step) * step];
+}
+
+export function getReturnChartDomain(chartData) {
+  const values = chartData.flatMap((point) => [
+    Number(point.displayPortfolioReturn),
+    Number(point.displayBenchmarkReturn),
+  ]).filter(Number.isFinite);
+  if (!values.length) return [-1, 1];
+
+  const minimum = Math.min(0, ...values);
+  const maximum = Math.max(0, ...values);
+  const span = Math.max(maximum - minimum, 1);
+  const paddedMinimum = minimum - span * 0.12;
+  const paddedMaximum = maximum + span * 0.12;
+  const roughStep = (paddedMaximum - paddedMinimum) / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const normalized = roughStep / magnitude;
+  const niceMultiplier = [1, 2, 2.5, 5, 10].find((candidate) => candidate >= normalized) || 10;
+  const step = niceMultiplier * magnitude;
+
+  return [Math.floor(paddedMinimum / step) * step, Math.ceil(paddedMaximum / step) * step];
 }

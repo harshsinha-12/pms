@@ -39,6 +39,7 @@ import {
   Line,
   Pie,
   PieChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -58,6 +59,7 @@ import {
   buildHoldingChartData,
   buildPortfolioChartData,
   getPortfolioChartDomain,
+  getReturnChartDomain,
 } from "./chart.js";
 import { screenUnderperformingHoldings } from "./underperformance.js";
 
@@ -95,6 +97,12 @@ function formatSignedMoney(value, currency = "INR", maximumFractionDigits = 0) {
   const amount = Number(value || 0);
   const sign = amount > 0 ? "+" : amount < 0 ? "−" : "";
   return `${sign}${formatMoney(Math.abs(amount), currency, maximumFractionDigits)}`;
+}
+
+function formatSignedPercent(value, suffix = "%") {
+  const amount = Number(value || 0);
+  const sign = amount > 0 ? "+" : amount < 0 ? "−" : "";
+  return `${sign}${Math.abs(amount).toFixed(2)}${suffix}`;
 }
 
 function formatIndianCompact(value, currency = "INR", usdInrRate = null) {
@@ -323,6 +331,13 @@ function normalizeSummary(raw = {}) {
         demoSummary.invested,
       ),
     ),
+    netInvested: Number(firstDefined(
+      raw.netInvested,
+      raw.net_invested_inr,
+      raw.invested,
+      raw.cost_basis_inr,
+      demoSummary.invested,
+    )),
     withdrawn: Number(firstDefined(raw.withdrawn, raw.total_withdrawn, demoSummary.withdrawn)),
     cash: Number(firstDefined(raw.cash, raw.cash_balance, demoSummary.cash)),
     unrealizedGain: Number(
@@ -406,7 +421,17 @@ function unpackPortfolio(response) {
               point.net_invested_inr,
               0,
             )),
-            benchmark: Number(firstDefined(point.benchmark, point.benchmark_value, 0)),
+            netInvested: Number(firstDefined(
+              point.netInvested,
+              point.net_invested_inr,
+              point.invested,
+              point.cost_basis_inr,
+              0,
+            )),
+            benchmark: (() => {
+              const rawBenchmark = firstDefined(point.benchmark, point.benchmark_value);
+              return rawBenchmark == null ? null : Number(rawBenchmark);
+            })(),
             holdings: Array.isArray(point.holdings)
               ? point.holdings.map((holding) => ({
                   symbol: firstDefined(holding.symbol, holding.ticker),
@@ -591,23 +616,45 @@ function PortfolioSummary({ summary, currency, usdInrRate, onCurrencyChange }) {
   );
 }
 
-function ChartTooltip({ active, payload, label, currency }) {
+function ChartTooltip({ active, payload, label, currency, comparison }) {
   if (!active || !payload?.length) return null;
   const portfolioValue = payload.find((item) => item.dataKey === "displayValue")?.value;
   const investedValue = payload.find((item) => item.dataKey === "displayInvested")?.value;
-  const benchmarkValue = payload.find((item) => item.dataKey === "displayBenchmark")?.value;
+  const portfolioReturn = payload.find((item) => item.dataKey === "displayPortfolioReturn")?.value;
+  const benchmarkReturn = payload.find((item) => item.dataKey === "displayBenchmarkReturn")?.value;
+  const relativeReturn = payload[0]?.payload?.relativeReturn;
+
+  if (comparison) {
+    return (
+      <div className="chart-tooltip comparison-tooltip">
+        <span>{fullDate(label)}</span>
+        <div className="tooltip-metric">
+          <small>Portfolio</small>
+          <strong>{formatSignedPercent(portfolioReturn)}</strong>
+        </div>
+        <div className="tooltip-metric">
+          <small>Nifty 50</small>
+          <strong>{Number.isFinite(benchmarkReturn) ? formatSignedPercent(benchmarkReturn) : "Unavailable"}</strong>
+        </div>
+        {Number.isFinite(relativeReturn) ? (
+          <small className={relativeReturn >= 0 ? "positive" : "negative"}>
+            {formatSignedPercent(relativeReturn, " pp")} {relativeReturn >= 0 ? "ahead" : "behind"}
+          </small>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div className="chart-tooltip">
       <span>{fullDate(label)}</span>
       <strong>{formatMoney(portfolioValue, currency)}</strong>
       {Number.isFinite(investedValue) ? <small>Invested · {formatMoney(investedValue, currency)}</small> : null}
-      {benchmarkValue ? <small>Nifty 50 · {formatMoney(benchmarkValue, currency)}</small> : null}
     </div>
   );
 }
 
-function PortfolioChart({ history, currentValue, currentInvested, range, currency, usdInrRate, benchmark, onRangeChange, onBenchmarkChange }) {
+function PortfolioChart({ history, currentValue, currentInvested, currentNetInvested, range, currency, usdInrRate, benchmark, onRangeChange, onBenchmarkChange }) {
   const chartData = useMemo(() => {
     return buildPortfolioChartData({
       history,
@@ -616,10 +663,12 @@ function PortfolioChart({ history, currentValue, currentInvested, range, currenc
       usdInrRate,
       currentValue,
       currentInvested,
+      currentNetInvested,
     });
-  }, [currency, currentInvested, currentValue, history, range, usdInrRate]);
+  }, [currency, currentInvested, currentNetInvested, currentValue, history, range, usdInrRate]);
 
-  const domain = getPortfolioChartDomain(chartData, range);
+  const domain = benchmark ? getReturnChartDomain(chartData) : getPortfolioChartDomain(chartData, range);
+  const hasBenchmarkData = chartData.some((point) => Number.isFinite(point.displayBenchmarkReturn));
 
   return (
     <section className="chart-section" aria-label="Portfolio history">
@@ -639,8 +688,17 @@ function PortfolioChart({ history, currentValue, currentInvested, range, currenc
         </div>
         <div className="chart-toolbar-actions">
           <div className="chart-legend" aria-label="Chart series">
-            <span><i className="current-series" />Current value</span>
-            <span><i className="invested-series" />Invested</span>
+            {benchmark ? (
+              <>
+                <span><i className="current-series" />Portfolio return</span>
+                <span><i className="benchmark-series" />Nifty 50</span>
+              </>
+            ) : (
+              <>
+                <span><i className="current-series" />Current value</span>
+                <span><i className="invested-series" />Invested</span>
+              </>
+            )}
           </div>
           <label className="benchmark-control">
             <span>vs Nifty 50</span>
@@ -654,7 +712,7 @@ function PortfolioChart({ history, currentValue, currentInvested, range, currenc
               <span />
             </button>
             <InfoTooltip label="About the Nifty 50 comparison">
-              Compare your portfolio&apos;s performance with the Nifty 50 benchmark.
+              Compares cash-flow-adjusted portfolio return with Nifty 50 return. Both reset to 0% at the start of the selected period.
             </InfoTooltip>
           </label>
         </div>
@@ -690,46 +748,67 @@ function PortfolioChart({ history, currentValue, currentInvested, range, currenc
               tickLine={false}
               tick={{ fill: "#656a64", fontSize: 11 }}
               width={44}
-              tickFormatter={(value) => formatIndianCompact(value, currency).replace(currency === "INR" ? "₹" : "$", "")}
+              tickFormatter={(value) => benchmark
+                ? `${Number(value).toFixed(Number.isInteger(value) ? 0 : 1)}%`
+                : formatIndianCompact(value, currency).replace(currency === "INR" ? "₹" : "$", "")}
             />
+            {benchmark ? <ReferenceLine y={0} stroke="#aeb4ad" strokeDasharray="3 3" /> : null}
             <Tooltip
               cursor={{ stroke: "#8d978e", strokeDasharray: "3 3" }}
-              content={<ChartTooltip currency={currency} />}
-            />
-            <Area
-              type="monotone"
-              dataKey="displayValue"
-              stroke="#176a35"
-              strokeWidth={2}
-              fill="url(#portfolioFill)"
-              activeDot={{ r: 4, fill: "#176a35", stroke: "#fff", strokeWidth: 2 }}
-              isAnimationActive={false}
-            />
-            <Line
-              type="stepAfter"
-              dataKey="displayInvested"
-              stroke="#a77931"
-              strokeWidth={1.7}
-              strokeDasharray="5 4"
-              dot={false}
-              activeDot={{ r: 3, fill: "#a77931", stroke: "#fff", strokeWidth: 2 }}
-              isAnimationActive={false}
+              content={<ChartTooltip currency={currency} comparison={benchmark} />}
             />
             {benchmark ? (
-              <Line
-                type="monotone"
-                dataKey="displayBenchmark"
-                stroke="#8e948e"
-                strokeWidth={1.5}
-                strokeDasharray="5 5"
-                dot={false}
-                activeDot={{ r: 3 }}
-                isAnimationActive={false}
-              />
+              <>
+                <Line
+                  type="monotone"
+                  dataKey="displayPortfolioReturn"
+                  stroke="#176a35"
+                  strokeWidth={2.2}
+                  dot={false}
+                  activeDot={{ r: 4, fill: "#176a35", stroke: "#fff", strokeWidth: 2 }}
+                  isAnimationActive={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="displayBenchmarkReturn"
+                  stroke="#a77931"
+                  strokeWidth={1.8}
+                  strokeDasharray="5 4"
+                  dot={false}
+                  activeDot={{ r: 3, fill: "#a77931", stroke: "#fff", strokeWidth: 2 }}
+                  isAnimationActive={false}
+                />
+              </>
+            ) : null}
+            {!benchmark ? (
+              <>
+                <Area
+                  type="monotone"
+                  dataKey="displayValue"
+                  stroke="#176a35"
+                  strokeWidth={2}
+                  fill="url(#portfolioFill)"
+                  activeDot={{ r: 4, fill: "#176a35", stroke: "#fff", strokeWidth: 2 }}
+                  isAnimationActive={false}
+                />
+                <Line
+                  type="stepAfter"
+                  dataKey="displayInvested"
+                  stroke="#a77931"
+                  strokeWidth={1.7}
+                  strokeDasharray="5 4"
+                  dot={false}
+                  activeDot={{ r: 3, fill: "#a77931", stroke: "#fff", strokeWidth: 2 }}
+                  isAnimationActive={false}
+                />
+              </>
             ) : null}
           </AreaChart>
           </ResponsiveContainer>
         )}
+        {benchmark && !hasBenchmarkData && chartData.length > 0 ? (
+          <div className="benchmark-unavailable">Refresh prices to load Nifty 50 history.</div>
+        ) : null}
       </div>
     </section>
   );
@@ -2141,7 +2220,7 @@ function SettingsDrawer({ currency, usdInrRate, benchmark, onCurrencyChange, onB
         </section>
         <section>
           <span className="setting-icon"><TrendUp size={20} /></span>
-          <div><strong>Nifty 50 benchmark</strong><p>Compare your portfolio&apos;s historical path.</p></div>
+          <div><strong>Nifty 50 benchmark</strong><p>Compare relative returns over the selected period.</p></div>
           <button className={cx("switch", benchmark && "is-on")} type="button" role="switch" aria-checked={benchmark} onClick={() => onBenchmarkChange(!benchmark)}><span /></button>
         </section>
         <section>
@@ -2444,6 +2523,7 @@ export function App() {
                 history={history}
                 currentValue={summary.totalValue}
                 currentInvested={summary.invested}
+                currentNetInvested={summary.netInvested}
                 range={range}
                 currency={currency}
                 usdInrRate={usdInrRate}

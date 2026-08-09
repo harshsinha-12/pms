@@ -83,6 +83,8 @@ async def test_weighted_average_realized_and_unrealized_pnl(
     assert history[-1].date == datetime.now(timezone.utc).astimezone(
         ZoneInfo("Asia/Kolkata")
     ).date()
+    assert history[0].benchmark_value == 24000
+    assert history[-1].benchmark_value > history[0].benchmark_value
     latest_position = next(point for point in history[-1].holdings if point.symbol == "RELIANCE.NS")
     assert latest_position.quantity == 15
     assert latest_position.cost_basis_inr == 2250
@@ -140,6 +142,37 @@ async def test_refresh_backfills_legacy_snapshots_with_holding_values(
     assert refreshed.summary.history
     assert all(
         snapshot.holdings
+        for snapshot in refreshed.summary.history
+        if snapshot.total_value_inr > 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_backfills_legacy_snapshots_with_benchmark_values(
+    repository: FakeRepository,
+    provider: FakeProvider,
+    settings,
+) -> None:
+    service = PortfolioService(repository, provider, settings)
+    await service.create_transaction(
+        TransactionCreate(
+            symbol="RELIANCE.NS",
+            quantity=Decimal("2"),
+            price=Decimal("100"),
+            currency=Currency.INR,
+            traded_at=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+    )
+    repository.snapshots = {
+        key: snapshot.model_copy(update={"benchmark_value": None})
+        for key, snapshot in repository.snapshots.items()
+    }
+
+    refreshed = await service.refresh()
+
+    assert refreshed.summary.history
+    assert all(
+        snapshot.benchmark_value is not None
         for snapshot in refreshed.summary.history
         if snapshot.total_value_inr > 0
     )

@@ -228,6 +228,7 @@ class PortfolioSnapshot(BaseModel):
     unrealized_pnl_inr: float
     realized_pnl_inr: float
     captured_at: datetime
+    benchmark_value: float | None = None
     holdings: list[HoldingSnapshot] = Field(default_factory=list)
 
 

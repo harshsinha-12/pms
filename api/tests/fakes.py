@@ -166,6 +166,12 @@ class FakeProvider:
             if symbol == "INR=X":
                 result[symbol] = {point: self.fx.rate for point in dates}
                 continue
+            if symbol == "^NSEI":
+                result[symbol] = {
+                    point: Decimal("24000") + Decimal(offset)
+                    for offset, point in enumerate(dates)
+                }
+                continue
             quote = self.quotes.get(symbol)
             if quote:
                 result[symbol] = {point: quote.price for point in dates}

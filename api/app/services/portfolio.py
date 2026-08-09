@@ -40,6 +40,7 @@ from ..repositories.base import PortfolioRepository
 ZERO = Decimal("0")
 ONE = Decimal("1")
 QUANTITY_EPSILON = Decimal("0.00000001")
+NIFTY_BENCHMARK_SYMBOL = "^NSEI"
 
 
 @dataclass
@@ -262,18 +263,34 @@ class PortfolioService:
 
         summary = await self._build_summary(include_history=False)
         existing_snapshots = await self._repository.list_snapshots()
+        latest_benchmark = next(
+            (
+                snapshot.benchmark_value
+                for snapshot in reversed(existing_snapshots)
+                if snapshot.benchmark_value is not None
+            ),
+            None,
+        )
         needs_holding_backfill = any(
             snapshot.total_value_inr > 0 and not snapshot.holdings
             for snapshot in existing_snapshots
         )
-        if needs_holding_backfill:
+        needs_benchmark_backfill = any(
+            snapshot.total_value_inr > 0 and snapshot.benchmark_value is None
+            for snapshot in existing_snapshots
+        )
+        if needs_holding_backfill or needs_benchmark_backfill:
             try:
                 await self._rebuild_daily_history()
             except MarketDataError as exc:
-                warnings.append(f"Per-holding history backfill is unavailable: {exc}")
-                await self._repository.save_snapshot(self._snapshot_from_summary(summary))
+                warnings.append(f"Historical chart backfill is unavailable: {exc}")
+                await self._repository.save_snapshot(
+                    self._snapshot_from_summary(summary, latest_benchmark)
+                )
         else:
-            await self._repository.save_snapshot(self._snapshot_from_summary(summary))
+            await self._repository.save_snapshot(
+                self._snapshot_from_summary(summary, latest_benchmark)
+            )
         summary = summary.model_copy(update={"history": await self._repository.list_snapshots()})
         stale_symbols = sorted(item.symbol for item in summary.holdings if item.quote_is_stale)
         return RefreshResponse(
@@ -692,7 +709,11 @@ class PortfolioService:
         portfolio_pe = covered_value / implied_earnings if implied_earnings > 0 else None
         return portfolio_pe, coverage
 
-    def _snapshot_from_summary(self, summary: PortfolioSummary) -> PortfolioSnapshot:
+    def _snapshot_from_summary(
+        self,
+        summary: PortfolioSummary,
+        benchmark_value: float | None = None,
+    ) -> PortfolioSnapshot:
         local_date = summary.as_of.astimezone(ZoneInfo(self._settings.portfolio_timezone)).date()
         return PortfolioSnapshot(
             date=local_date,
@@ -702,6 +723,7 @@ class PortfolioService:
             unrealized_pnl_inr=summary.metrics.unrealized_pnl_inr,
             realized_pnl_inr=summary.metrics.realized_pnl_inr,
             captured_at=summary.as_of,
+            benchmark_value=benchmark_value,
             holdings=[
                 HoldingSnapshot(
                     symbol=holding.symbol,
@@ -716,7 +738,18 @@ class PortfolioService:
 
     async def _save_daily_snapshot(self) -> None:
         summary = await self._build_summary(include_history=False)
-        await self._repository.save_snapshot(self._snapshot_from_summary(summary))
+        snapshots = await self._repository.list_snapshots()
+        latest_benchmark = next(
+            (
+                snapshot.benchmark_value
+                for snapshot in reversed(snapshots)
+                if snapshot.benchmark_value is not None
+            ),
+            None,
+        )
+        await self._repository.save_snapshot(
+            self._snapshot_from_summary(summary, latest_benchmark)
+        )
 
     async def _rebuild_history_or_snapshot(self) -> None:
         try:
@@ -743,7 +776,9 @@ class PortfolioService:
 
         symbols = sorted({item.symbol for item in transactions})
         needs_fx = any(item.currency == Currency.USD for item in transactions)
-        requested_symbols = [*symbols, "INR=X"] if needs_fx else symbols
+        requested_symbols = [*symbols, NIFTY_BENCHMARK_SYMBOL]
+        if needs_fx:
+            requested_symbols.append("INR=X")
         history = await self._provider.get_daily_history(requested_symbols, start_date)
         if not any(history.get(symbol) for symbol in symbols):
             raise MarketDataError("Yahoo Finance returned no historical prices")
@@ -754,6 +789,7 @@ class PortfolioService:
         ]
         last_prices: dict[str, Decimal] = {}
         last_fx: Decimal | None = None
+        last_benchmark: Decimal | None = None
         snapshots: list[PortfolioSnapshot] = []
 
         for offset in range((today - start_date).days + 1):
@@ -765,6 +801,9 @@ class PortfolioService:
             fx_point = history.get("INR=X", {}).get(valuation_date)
             if fx_point is not None:
                 last_fx = fx_point
+            benchmark_point = history.get(NIFTY_BENCHMARK_SYMBOL, {}).get(valuation_date)
+            if benchmark_point is not None:
+                last_benchmark = benchmark_point
 
             day_transactions = [
                 item
@@ -816,6 +855,7 @@ class PortfolioService:
                     unrealized_pnl_inr=float(total_value - total_cost),
                     realized_pnl_inr=float(total_realized),
                     captured_at=captured_local.astimezone(timezone.utc),
+                    benchmark_value=float(last_benchmark) if last_benchmark is not None else None,
                     holdings=holding_snapshots,
                 )
             )
