@@ -62,6 +62,13 @@ import {
   getReturnChartDomain,
 } from "./chart.js";
 import { screenUnderperformingHoldings } from "./underperformance.js";
+import {
+  buildRiskReductionPlan,
+  buildTargetPlan,
+  calculateConcentration,
+  calculatePerformanceAnalytics,
+  calculateReturnAttribution,
+} from "./portfolioAnalytics.js";
 
 const RANGE_DAYS = { "1M": 31, "6M": 183, "1Y": 366, All: Infinity };
 
@@ -231,6 +238,8 @@ function normalizeTransactionForEdit(raw) {
     side: String(firstDefined(raw.side, raw.type, raw.transaction_type, "BUY")).toUpperCase(),
     quantity: Number(firstDefined(raw.quantity, raw.units, 0)),
     price: Number(firstDefined(raw.price, raw.average_price, raw.averagePrice, 0)),
+    fees: Number(firstDefined(raw.fees, 0)),
+    fxRateToInr: Number(firstDefined(raw.fxRateToInr, raw.fx_rate_to_inr, 1)),
     tradedAt: firstDefined(raw.traded_at, raw.transaction_date, raw.date, raw.created_at),
     createdAt: firstDefined(raw.created_at, raw.traded_at, raw.transaction_date, raw.date),
     currency: firstDefined(raw.currency, "INR"),
@@ -545,13 +554,19 @@ function Sidebar({ activeItem, onNavigate }) {
 }
 
 function Topbar({ activeView, lastUpdated, refreshing, onRefresh, onAdd }) {
+  const title = activeView === "holdings"
+    ? "Holdings"
+    : activeView === "analytics" ? "Performance & risk" : "Good morning, Harsh";
+  const context = activeView === "holdings"
+    ? "Open positions"
+    : activeView === "analytics" ? "Portfolio analytics" : "Prices";
   return (
     <header className="topbar">
       <div>
-        <h1>{activeView === "holdings" ? "Holdings" : "Good morning, Harsh"}</h1>
+        <h1>{title}</h1>
         <p>
           <Clock size={17} />
-          {activeView === "holdings" ? "Open positions" : "Prices"} as of {formatTimestamp(lastUpdated)} IST
+          {context} as of {formatTimestamp(lastUpdated)} IST
         </p>
       </div>
       <div className="topbar-actions">
@@ -654,7 +669,7 @@ function ChartTooltip({ active, payload, label, currency, comparison }) {
   );
 }
 
-function PortfolioChart({ history, currentValue, currentInvested, currentNetInvested, range, currency, usdInrRate, benchmark, onRangeChange, onBenchmarkChange }) {
+function PortfolioChart({ history, currentValue, currentInvested, currentNetInvested, range, currency, usdInrRate, benchmark, onRangeChange, onBenchmarkChange, lockBenchmark = false }) {
   const chartData = useMemo(() => {
     return buildPortfolioChartData({
       history,
@@ -700,7 +715,7 @@ function PortfolioChart({ history, currentValue, currentInvested, currentNetInve
               </>
             )}
           </div>
-          <label className="benchmark-control">
+          {!lockBenchmark ? <label className="benchmark-control">
             <span>vs Nifty 50</span>
             <button
               className={cx("switch", benchmark && "is-on")}
@@ -714,7 +729,7 @@ function PortfolioChart({ history, currentValue, currentInvested, currentNetInve
             <InfoTooltip label="About the Nifty 50 comparison">
               Compares unitized portfolio return with Nifty 50 return. Added or withdrawn capital does not count as investment performance, and both series reset to 0% at the start of the selected period.
             </InfoTooltip>
-          </label>
+          </label> : null}
         </div>
       </div>
       <div className="chart-canvas">
@@ -1415,6 +1430,461 @@ function HoldingsView({
         usdInrRate={usdInrRate}
         onBuy={onBuy}
       />
+    </div>
+  );
+}
+
+function analyticsValue(value, suffix = "%", decimals = 2) {
+  return Number.isFinite(value) ? `${Number(value).toFixed(decimals)}${suffix}` : "Not enough history";
+}
+
+function AnalyticsMetric({ label, value, detail, tone = "neutral", info }) {
+  return (
+    <article className="analytics-metric-card">
+      <p>
+        {label}
+        {info ? <InfoTooltip label={`About ${label}`}>{info}</InfoTooltip> : null}
+      </p>
+      <strong className={tone}>{value}</strong>
+      {detail ? <span>{detail}</span> : null}
+    </article>
+  );
+}
+
+function DrawdownTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  const row = payload[0]?.payload;
+  return (
+    <div className="chart-tooltip comparison-tooltip">
+      <span>{fullDate(label)}</span>
+      <div className="tooltip-metric">
+        <small>Portfolio drawdown</small>
+        <strong>{formatSignedPercent(row?.portfolioDrawdown)}</strong>
+      </div>
+      <div className="tooltip-metric">
+        <small>Nifty 50 drawdown</small>
+        <strong>{Number.isFinite(row?.niftyDrawdown) ? formatSignedPercent(row.niftyDrawdown) : "Unavailable"}</strong>
+      </div>
+      <small>{row?.daysSincePeak || 0} days since portfolio peak</small>
+    </div>
+  );
+}
+
+function ExposureList({ title, rows }) {
+  return (
+    <section className="exposure-card">
+      <h3>{title}</h3>
+      <div>
+        {rows.map((item) => (
+          <span key={item.key}>
+            <small>{item.key}</small>
+            <i><b style={{ width: `${Math.min(100, item.weight)}%` }} /></i>
+            <strong>{item.weight.toFixed(1)}%</strong>
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+const ANALYTICS_PREFERENCES_KEY = "quiet-capital-analytics-v1";
+
+function AnalyticsView({
+  history,
+  holdings,
+  transactions,
+  summary,
+  usdInrRate,
+}) {
+  const [range, setRange] = useState("All");
+  const [attributionMode, setAttributionMode] = useState("security");
+  const [dimension, setDimension] = useState("holding");
+  const [planMode, setPlanMode] = useState("new-cash");
+  const [newCash, setNewCash] = useState(0);
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const [preferences, setPreferences] = useState({
+    riskFreeRate: 6.5,
+    holdingLimit: 10,
+    sectorLimit: 25,
+    noTradeBand: 1,
+    targets: { holding: {}, sector: {}, asset: {}, currency: {} },
+  });
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(ANALYTICS_PREFERENCES_KEY) || "null");
+      if (saved && typeof saved === "object") {
+        setPreferences((current) => ({
+          ...current,
+          ...saved,
+          targets: { ...current.targets, ...(saved.targets || {}) },
+        }));
+      }
+    } catch {
+      // Keep safe defaults when stored preferences are malformed or unavailable.
+    }
+    setPreferencesLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!preferencesLoaded) return;
+    try {
+      window.localStorage.setItem(ANALYTICS_PREFERENCES_KEY, JSON.stringify(preferences));
+    } catch {
+      // Analytics remains usable even when browser storage is unavailable.
+    }
+  }, [preferences, preferencesLoaded]);
+
+  const chartData = useMemo(() => buildPortfolioChartData({
+    history,
+    range,
+    currency: "INR",
+    usdInrRate,
+    currentValue: summary.totalValue,
+    currentInvested: summary.invested,
+    currentNetInvested: summary.netInvested,
+  }), [history, range, summary.invested, summary.netInvested, summary.totalValue, usdInrRate]);
+  const performance = useMemo(
+    () => calculatePerformanceAnalytics(chartData, { riskFreeRatePercent: preferences.riskFreeRate }),
+    [chartData, preferences.riskFreeRate],
+  );
+  const attribution = useMemo(
+    () => calculateReturnAttribution({ history, holdings, transactions, range }),
+    [history, holdings, range, transactions],
+  );
+  const concentration = useMemo(
+    () => calculateConcentration(holdings, {
+      holdingLimitPercent: preferences.holdingLimit,
+      sectorLimitPercent: preferences.sectorLimit,
+    }),
+    [holdings, preferences.holdingLimit, preferences.sectorLimit],
+  );
+  const totalValue = Number(summary.totalValue || 0);
+  const holdingNames = useMemo(
+    () => new Map(holdings.map((holding) => [holding.symbol, holding.name || holding.symbol])),
+    [holdings],
+  );
+  const dimensionItems = useMemo(() => {
+    const source = dimension === "holding"
+      ? concentration.holdings
+      : dimension === "sector" ? concentration.sectors
+        : dimension === "asset" ? concentration.assets : concentration.currencies;
+    return source.map((item) => ({
+      ...item,
+      label: dimension === "holding" ? holdingNames.get(item.key) || item.key : item.key,
+    }));
+  }, [concentration, dimension, holdingNames]);
+  const activeTargets = preferences.targets[dimension] || {};
+  const targetPlan = useMemo(() => {
+    if (planMode === "reduce-risk") {
+      return buildRiskReductionPlan(holdings, {
+        totalValue,
+        holdingLimitPercent: preferences.holdingLimit,
+        sectorLimitPercent: preferences.sectorLimit,
+      });
+    }
+    return buildTargetPlan(dimensionItems, activeTargets, {
+      mode: planMode,
+      totalValue,
+      newCash: Number(newCash || 0),
+      noTradeBandPercent: preferences.noTradeBand,
+    });
+  }, [activeTargets, dimensionItems, holdings, newCash, planMode, preferences.holdingLimit, preferences.noTradeBand, preferences.sectorLimit, totalValue]);
+  const attributionRows = attributionMode === "security" ? attribution.holdings : attribution.sectors;
+  const riskDetail = `${performance.observations} aligned observations`;
+
+  function updatePreference(key, value) {
+    setPreferences((current) => ({ ...current, [key]: Number(value) }));
+  }
+
+  function updateTarget(key, value) {
+    setPreferences((current) => ({
+      ...current,
+      targets: {
+        ...current.targets,
+        [dimension]: { ...current.targets[dimension], [key]: Number(value) },
+      },
+    }));
+  }
+
+  function useCurrentWeights() {
+    const targets = Object.fromEntries(dimensionItems.map((item) => [item.key, Number(item.weight.toFixed(2))]));
+    const difference = 100 - Object.values(targets).reduce((sum, value) => sum + value, 0);
+    if (dimensionItems[0]) targets[dimensionItems[0].key] += difference;
+    setPreferences((current) => ({
+      ...current,
+      targets: { ...current.targets, [dimension]: targets },
+    }));
+  }
+
+  return (
+    <div className="analytics-view">
+      <section className="analytics-intro">
+        <div>
+          <p className="eyebrow">Portfolio intelligence</p>
+          <h2>Performance &amp; Risk Center</h2>
+          <p>Measure contribution-neutral returns, identify risk concentration, and model allocation changes before recording a transaction.</p>
+        </div>
+        <div className="analytics-period">
+          <small>Selected period</small>
+          <strong>{performance.periodStart && performance.periodEnd ? `${fullDate(performance.periodStart)} — ${fullDate(performance.periodEnd)}` : "Unavailable"}</strong>
+        </div>
+      </section>
+
+      <section className="performance-panel" aria-labelledby="performance-summary-title">
+        <div className="analytics-section-heading">
+          <div>
+            <p className="eyebrow">Priority 1</p>
+            <h2 id="performance-summary-title">Performance summary</h2>
+          </div>
+          <span>Returns reset at the selected period start</span>
+        </div>
+        <div className="performance-hero-grid">
+          <AnalyticsMetric label="Portfolio TWR" value={analyticsValue(performance.portfolioReturn)} tone={performance.portfolioReturn >= 0 ? "positive" : "negative"} detail="Contribution-neutral" />
+          <AnalyticsMetric label="Nifty 50 return" value={analyticsValue(performance.niftyReturn)} tone={performance.niftyReturn >= 0 ? "positive" : "negative"} detail="^NSEI benchmark" />
+          <AnalyticsMetric label="Active return" value={analyticsValue(performance.activeReturn, " pp")} tone={performance.activeReturn >= 0 ? "positive" : "negative"} detail={performance.activeReturn >= 0 ? "Ahead of Nifty 50" : "Behind Nifty 50"} />
+          <AnalyticsMetric label="Rolling 1 month" value={analyticsValue(performance.rollingOneMonth)} detail="21 observed market days" />
+          <AnalyticsMetric label="Rolling 3 months" value={analyticsValue(performance.rollingThreeMonth)} detail="63 observed market days" />
+        </div>
+        <PortfolioChart
+          history={history}
+          currentValue={summary.totalValue}
+          currentInvested={summary.invested}
+          currentNetInvested={summary.netInvested}
+          range={range}
+          currency="INR"
+          usdInrRate={usdInrRate}
+          benchmark
+          lockBenchmark
+          onRangeChange={setRange}
+          onBenchmarkChange={() => {}}
+        />
+        <div className="period-extremes">
+          <span>
+            <small>Best rolling month</small>
+            <strong className="positive">{performance.bestMonth ? formatSignedPercent(performance.bestMonth.returnPercent) : "Not enough history"}</strong>
+            {performance.bestMonth ? <em>{fullDate(performance.bestMonth.startDate)} — {fullDate(performance.bestMonth.endDate)}</em> : null}
+          </span>
+          <span>
+            <small>Worst rolling month</small>
+            <strong className="negative">{performance.worstMonth ? formatSignedPercent(performance.worstMonth.returnPercent) : "Not enough history"}</strong>
+            {performance.worstMonth ? <em>{fullDate(performance.worstMonth.startDate)} — {fullDate(performance.worstMonth.endDate)}</em> : null}
+          </span>
+        </div>
+      </section>
+
+      <section className="risk-panel" aria-labelledby="risk-metrics-title">
+        <div className="analytics-section-heading">
+          <div>
+            <p className="eyebrow">Daily unitized returns</p>
+            <h2 id="risk-metrics-title">Risk metrics</h2>
+          </div>
+          <label className="risk-free-setting">
+            <span>Risk-free assumption</span>
+            <span><input type="number" step="0.1" min="0" max="30" value={preferences.riskFreeRate} onChange={(event) => updatePreference("riskFreeRate", event.target.value)} />%</span>
+            <small>Source: portfolio assumption</small>
+          </label>
+        </div>
+        <div className="risk-grid">
+          <AnalyticsMetric label="Annualized volatility" value={analyticsValue(performance.annualizedVolatility)} detail={riskDetail} info="Sample standard deviation of daily unitized returns, annualized using 252 market days. Requires 60 aligned observations." />
+          <AnalyticsMetric label="Downside deviation" value={analyticsValue(performance.downsideDeviation)} detail={riskDetail} info="Annualized deviation of daily returns below 0%. Requires 60 aligned observations." />
+          <AnalyticsMetric label="Maximum drawdown" value={analyticsValue(performance.maximumDrawdown)} tone="negative" detail={performance.maximumDrawdownDate ? `Trough on ${fullDate(performance.maximumDrawdownDate)}` : riskDetail} info="Largest peak-to-trough decline. Requires 60 observations." />
+          <AnalyticsMetric label="Current drawdown" value={analyticsValue(performance.currentDrawdown)} tone="negative" detail={Number.isFinite(performance.currentDrawdownDays) ? `${performance.currentDrawdownDays} days since peak` : riskDetail} info="Decline from the latest portfolio high-water mark. Requires 20 observations." />
+          <AnalyticsMetric label="Beta to Nifty 50" value={analyticsValue(performance.beta, "", 2)} detail={riskDetail} info="Covariance of portfolio and Nifty returns divided by Nifty return variance. Requires 60 aligned observations." />
+          <AnalyticsMetric label="Tracking error" value={analyticsValue(performance.trackingError)} detail={riskDetail} info="Annualized volatility of daily portfolio return minus Nifty 50 return. Requires 60 aligned observations." />
+          <AnalyticsMetric label="Information ratio" value={analyticsValue(performance.informationRatio, "", 2)} detail="Active return per unit of tracking error" />
+          <AnalyticsMetric label="Sharpe ratio" value={analyticsValue(performance.sharpeRatio, "", 2)} detail={`Risk-free: ${preferences.riskFreeRate.toFixed(1)}% user assumption`} />
+          <AnalyticsMetric label="Sortino ratio" value={analyticsValue(performance.sortinoRatio, "", 2)} detail={`Risk-free: ${preferences.riskFreeRate.toFixed(1)}% user assumption`} />
+        </div>
+      </section>
+
+      <section className="drawdown-panel" aria-labelledby="drawdown-title">
+        <div className="analytics-section-heading">
+          <div>
+            <p className="eyebrow">Peak-to-trough</p>
+            <h2 id="drawdown-title">Drawdown</h2>
+          </div>
+          <div className="chart-legend">
+            <span><i className="current-series" />Portfolio</span>
+            <span><i className="benchmark-series" />Nifty 50</span>
+          </div>
+        </div>
+        <div className="drawdown-chart">
+          {performance.drawdownData.length ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={performance.drawdownData} margin={{ top: 10, right: 8, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="drawdownFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#a7473d" stopOpacity={0.04} />
+                    <stop offset="100%" stopColor="#a7473d" stopOpacity={0.22} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid vertical={false} stroke="#d9ddd4" strokeDasharray="2 3" />
+                <XAxis dataKey="date" tickFormatter={shortDate} minTickGap={55} axisLine={{ stroke: "#cbd0c7" }} tickLine={false} tick={{ fill: "#656a64", fontSize: 11 }} />
+                <YAxis domain={["auto", 0]} tickFormatter={(value) => `${Number(value).toFixed(0)}%`} width={44} axisLine={false} tickLine={false} tick={{ fill: "#656a64", fontSize: 11 }} />
+                <ReferenceLine y={0} stroke="#aeb4ad" />
+                <Tooltip cursor={{ stroke: "#8d978e", strokeDasharray: "3 3" }} content={<DrawdownTooltip />} />
+                <Area type="monotone" dataKey="portfolioDrawdown" stroke="#a7473d" strokeWidth={2} fill="url(#drawdownFill)" dot={false} isAnimationActive={false} />
+                <Line type="monotone" dataKey="niftyDrawdown" stroke="#a77931" strokeWidth={1.7} strokeDasharray="5 4" dot={false} isAnimationActive={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : <div className="chart-empty"><ChartLineUp size={25} /><strong>Drawdown history is unavailable</strong></div>}
+        </div>
+      </section>
+
+      <section className="attribution-panel" aria-labelledby="attribution-title">
+        <div className="analytics-section-heading">
+          <div>
+            <p className="eyebrow">Return attribution</p>
+            <h2 id="attribution-title">What drove the result</h2>
+          </div>
+          <div className="allocation-toggle" role="group" aria-label="Attribution breakdown">
+            <button type="button" className={attributionMode === "security" ? "is-selected" : ""} onClick={() => setAttributionMode("security")}>Security</button>
+            <button type="button" className={attributionMode === "sector" ? "is-selected" : ""} onClick={() => setAttributionMode("sector")}>Sector</button>
+          </div>
+        </div>
+        {attributionRows.length ? (
+          <div className="analytics-table-wrap">
+            <table className="analytics-table">
+              <thead><tr><th>{attributionMode === "security" ? "Holding" : "Sector"}</th><th>Contribution</th><th>INR impact</th><th>Signal</th></tr></thead>
+              <tbody>
+                {attributionRows.slice(0, 15).map((row) => {
+                  const key = attributionMode === "security" ? row.symbol : row.sector;
+                  return (
+                    <tr key={key}>
+                      <td><strong>{attributionMode === "security" ? row.name : row.sector}</strong><small>{attributionMode === "security" ? `${row.symbol} · ${row.sector}` : `${row.holdings} holdings`}</small></td>
+                      <td className={row.contributionPp >= 0 ? "positive" : "negative"}>{formatSignedPercent(row.contributionPp, " pp")}</td>
+                      <td className={row.contributionInr >= 0 ? "positive" : "negative"}>{formatSignedMoney(row.contributionInr, "INR")}</td>
+                      <td>{row.contributionPp >= 0 ? "Added" : "Detracted"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : <div className="analytics-empty">Not enough holding history for attribution in this period.</div>}
+        <p className="analytics-method-note">
+          {attribution.method === "daily-flow-adjusted"
+            ? "Daily previous-weight attribution adjusted for dated buys and sells."
+            : "Approximate daily previous-weight attribution using holding cost-basis changes where transaction cash flows are unavailable."}
+          {" "}This is not Brinson attribution.
+        </p>
+      </section>
+
+      <section className="concentration-panel" aria-labelledby="concentration-title">
+        <div className="analytics-section-heading">
+          <div>
+            <p className="eyebrow">Priority 2</p>
+            <h2 id="concentration-title">Concentration analysis</h2>
+          </div>
+          <div className="limit-settings">
+            <label>Holding limit <span><input type="number" min="1" max="100" step="0.5" value={preferences.holdingLimit} onChange={(event) => updatePreference("holdingLimit", event.target.value)} />%</span></label>
+            <label>Sector limit <span><input type="number" min="1" max="100" step="0.5" value={preferences.sectorLimit} onChange={(event) => updatePreference("sectorLimit", event.target.value)} />%</span></label>
+          </div>
+        </div>
+        <div className="concentration-grid">
+          <AnalyticsMetric label="Largest holding" value={concentration.largestHolding ? `${concentration.largestHolding.weight.toFixed(1)}%` : "—"} detail={concentration.largestHolding?.key} />
+          <AnalyticsMetric label="Top 5 holdings" value={`${concentration.top5Weight.toFixed(1)}%`} detail="Combined portfolio weight" />
+          <AnalyticsMetric label="Top 10 holdings" value={`${concentration.top10Weight.toFixed(1)}%`} detail="Combined portfolio weight" />
+          <AnalyticsMetric label="Largest sector" value={concentration.largestSector ? `${concentration.largestSector.weight.toFixed(1)}%` : "—"} detail={concentration.largestSector?.key} />
+          <AnalyticsMetric label="Top 3 sectors" value={`${concentration.top3SectorWeight.toFixed(1)}%`} detail="Combined portfolio weight" />
+          <AnalyticsMetric label="Effective holdings" value={concentration.effectiveHoldings.toFixed(1)} detail={`${holdings.length} actual holdings`} info="One divided by the sum of squared holding weights. Lower than the actual count when capital is concentrated." />
+        </div>
+        <div className="breach-summary">
+          <span className={concentration.holdingBreaches.length ? "has-breach" : ""}><strong>{concentration.holdingBreaches.length}</strong> holdings above {preferences.holdingLimit}%</span>
+          <span className={concentration.sectorBreaches.length ? "has-breach" : ""}><strong>{concentration.sectorBreaches.length}</strong> sectors above {preferences.sectorLimit}%</span>
+        </div>
+        {concentration.holdingBreaches.length || concentration.sectorBreaches.length ? (
+          <div className="breach-list" aria-label="Allocation limit breaches">
+            {concentration.holdingBreaches.map((item) => <span key={`holding-${item.key}`}><small>Holding</small>{item.key}<strong>{item.weight.toFixed(1)}%</strong></span>)}
+            {concentration.sectorBreaches.map((item) => <span key={`sector-${item.key}`}><small>Sector</small>{item.key}<strong>{item.weight.toFixed(1)}%</strong></span>)}
+          </div>
+        ) : null}
+        <div className="exposure-grid">
+          <ExposureList title="Country exposure" rows={concentration.countries} />
+          <ExposureList title="Currency exposure" rows={concentration.currencies} />
+          <ExposureList title="Asset exposure" rows={concentration.assets} />
+        </div>
+      </section>
+
+      <section className="rebalancing-panel" aria-labelledby="rebalancing-title">
+        <div className="analytics-section-heading">
+          <div>
+            <p className="eyebrow">Priority 3</p>
+            <h2 id="rebalancing-title">Target-weight rebalancing</h2>
+          </div>
+          <span>Planning only · no transaction is recorded</span>
+        </div>
+        <div className="planner-controls">
+          <div className="planner-control-group">
+            <small>Plan by</small>
+            <div className="planner-segmented" role="group" aria-label="Rebalancing dimension">
+              {[['holding', 'Holding'], ['sector', 'Sector'], ['asset', 'Asset'], ['currency', 'Currency']].map(([key, label]) => <button type="button" key={key} className={dimension === key ? "is-selected" : ""} onClick={() => setDimension(key)}>{label}</button>)}
+            </div>
+          </div>
+          <div className="planner-control-group">
+            <small>Mode</small>
+            <div className="planner-segmented" role="group" aria-label="Rebalancing mode">
+              <button type="button" className={planMode === "new-cash" ? "is-selected" : ""} onClick={() => setPlanMode("new-cash")}>New cash only</button>
+              <button type="button" className={planMode === "buys-sells" ? "is-selected" : ""} onClick={() => setPlanMode("buys-sells")}>Buys &amp; sells</button>
+              <button type="button" className={planMode === "reduce-risk" ? "is-selected" : ""} onClick={() => setPlanMode("reduce-risk")}>Reduce risk</button>
+            </div>
+          </div>
+          {planMode === "new-cash" ? <label className="planner-number">New cash <span>₹<input type="number" min="0" step="1000" value={newCash} onChange={(event) => setNewCash(event.target.value)} /></span></label> : null}
+          {planMode !== "reduce-risk" ? <label className="planner-number">No-trade band <span><input type="number" min="0" max="20" step="0.1" value={preferences.noTradeBand} onChange={(event) => updatePreference("noTradeBand", event.target.value)} /> pp</span></label> : null}
+        </div>
+
+        {planMode !== "reduce-risk" ? (
+          <div className="targets-editor">
+            <div className="targets-editor-heading">
+              <p>Targets must total 100%. Values are stored in this browser.</p>
+              <button type="button" onClick={useCurrentWeights}>Use current weights</button>
+            </div>
+            <div className="targets-list">
+              {dimensionItems.map((item) => (
+                <label key={item.key}>
+                  <span><strong>{item.label}</strong><small>{item.key !== item.label ? item.key : "Current allocation"}</small></span>
+                  <em>{item.weight.toFixed(1)}%</em>
+                  <span className="target-input"><input type="number" min="0" max="100" step="0.1" value={activeTargets[item.key] ?? ""} onChange={(event) => updateTarget(item.key, event.target.value)} placeholder="0" />%</span>
+                </label>
+              ))}
+            </div>
+            <div className={cx("target-total", Math.abs(targetPlan.targetTotal - 100) > 0.1 && "is-invalid")}>
+              <span>Target total</span><strong>{targetPlan.targetTotal.toFixed(1)}%</strong>
+            </div>
+          </div>
+        ) : (
+          <div className="risk-reduction-note">Uses the {preferences.holdingLimit}% holding and {preferences.sectorLimit}% sector limits above. Proposed reductions remain uninvested cash.</div>
+        )}
+
+        <div className="plan-summary-grid">
+          <AnalyticsMetric label="Cash needed" value={formatMoney(targetPlan.cashNeeded, "INR")} detail={planMode === "new-cash" ? "Limited by new cash" : "Proposed purchases"} />
+          <AnalyticsMetric label="Cash released" value={formatMoney(targetPlan.cashReleased, "INR")} detail="Proposed reductions" />
+          <AnalyticsMetric label="Unallocated cash" value={formatMoney(targetPlan.unallocatedCash, "INR")} detail={planMode === "reduce-risk" ? "Held after reducing risk" : "Remaining after plan"} />
+          <AnalyticsMetric label="Post-trade concentration" value={targetPlan.rows.length ? `${Math.max(...targetPlan.rows.map((item) => item.postTradeWeight)).toFixed(1)}%` : "—"} detail="Largest planned line item" />
+        </div>
+
+        {targetPlan.rows.length ? (
+          <div className="analytics-table-wrap">
+            <table className="analytics-table plan-table">
+              <thead><tr><th>{planMode === "reduce-risk" ? "Holding" : "Allocation"}</th><th>Current</th><th>{planMode === "reduce-risk" ? "Limit plan" : "Target"}</th><th>Drift</th><th>Suggested action</th><th>Post-trade</th></tr></thead>
+              <tbody>
+                {targetPlan.rows.map((row) => (
+                  <tr key={row.key}>
+                    <td><strong>{row.label || row.key}</strong><small>{row.key}</small></td>
+                    <td>{row.weight.toFixed(1)}%</td>
+                    <td>{Number.isFinite(row.targetWeight) ? `${row.targetWeight.toFixed(1)}%` : `≤ ${preferences.holdingLimit}%`}</td>
+                    <td className={Math.abs(row.drift || 0) > preferences.noTradeBand ? "negative" : "neutral"}>{Number.isFinite(row.drift) ? formatSignedPercent(row.drift, " pp") : "—"}</td>
+                    <td className={row.trade > 0 ? "positive" : row.trade < 0 ? "negative" : "neutral"}>{Math.abs(row.trade) < 0.01 ? "No trade" : `${row.trade > 0 ? "Buy" : "Sell"} ${formatMoney(Math.abs(row.trade), "INR")}`}</td>
+                    <td>{row.postTradeWeight.toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <div className="analytics-empty">{planMode === "reduce-risk" ? "No holdings require reduction under the configured limits." : "Set targets totaling 100% to calculate a plan."}</div>}
+        <p className="analytics-method-note">Review taxes, liquidity, and execution prices before acting. Use Add transaction to record any decision explicitly.</p>
+      </section>
     </div>
   );
 }
@@ -2257,6 +2727,7 @@ export function App() {
   const [allocation, setAllocation] = useState(demoAllocation);
   const [sectorAllocation, setSectorAllocation] = useState([]);
   const [transactions, setTransactions] = useState(demoTransactions);
+  const [ledgerTransactions, setLedgerTransactions] = useState([]);
   const [activeView, setActiveView] = useState("overview");
   const [currency, setCurrency] = useState("INR");
   const [range, setRange] = useState("All");
@@ -2297,13 +2768,32 @@ export function App() {
     return response;
   }, [applyPortfolio]);
 
+  const reloadTransactions = useCallback(async (signal) => {
+    const response = await portfolioApi.getTransactions(signal);
+    const rows = response?.transactions ?? response?.data ?? response;
+    if (!Array.isArray(rows)) return [];
+    const normalized = rows.map(normalizeTransactionForEdit);
+    setLedgerTransactions(normalized);
+    setTransactions(normalized.map((row, index) => ({
+      id: row.id || index,
+      type: row.side.toLowerCase().replace(/^./, (letter) => letter.toUpperCase()),
+      symbol: row.symbol || "—",
+      date: fullDate(row.tradedAt || row.createdAt),
+      quantity: row.quantity,
+      amount: Number(row.quantity || 0) * Number(row.price || 0),
+      currency: row.currency || "INR",
+    })));
+    return normalized;
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     portfolioApi.getPortfolio(controller.signal)
       .then(applyPortfolio)
       .catch(() => {});
+    reloadTransactions(controller.signal).catch(() => {});
     return () => controller.abort();
-  }, [applyPortfolio]);
+  }, [applyPortfolio, reloadTransactions]);
 
   useEffect(() => {
     if (!usdInrRate && currency === "USD") setCurrency("INR");
@@ -2352,22 +2842,7 @@ export function App() {
     if (destination === "transactions") {
       setDrawer("transactions");
       const controller = new AbortController();
-      portfolioApi.getTransactions(controller.signal)
-        .then((response) => {
-          const rows = response?.transactions ?? response?.data ?? response;
-          if (Array.isArray(rows) && rows.length) {
-            setTransactions(rows.map((row, index) => ({
-              id: firstDefined(row.id, row.transaction_id, index),
-              type: firstDefined(row.type, row.transaction_type, row.side, "Buy").toLowerCase().replace(/^./, (letter) => letter.toUpperCase()),
-              symbol: firstDefined(row.symbol, row.ticker, "—"),
-              date: fullDate(firstDefined(row.date, row.transaction_date, row.traded_at, row.created_at)),
-              quantity: firstDefined(row.quantity, row.units),
-              amount: Number(firstDefined(row.amount, Number(row.quantity || 0) * Number(row.price || 0), 0)),
-              currency: firstDefined(row.currency, "INR"),
-            })));
-          }
-        })
-        .catch(() => {});
+      reloadTransactions(controller.signal).catch(() => {});
       return;
     }
     if (destination === "settings") {
@@ -2380,14 +2855,14 @@ export function App() {
       window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
-    setActiveView("overview");
-    setDrawer(null);
     if (destination === "analytics") {
-      window.setTimeout(() => {
-        document.getElementById("analytics-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }, 0);
+      setActiveView("analytics");
+      setDrawer(null);
+      window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
+    setActiveView("overview");
+    setDrawer(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -2469,6 +2944,7 @@ export function App() {
     try {
       await portfolioApi.createTransaction(payload);
       await reloadPortfolio();
+      await reloadTransactions();
       showToast(
         `${form.side === "BUY" ? "Bought" : "Sold"} ${form.quantity.toLocaleString("en-IN")} ${form.symbol}.`,
       );
@@ -2489,6 +2965,7 @@ export function App() {
     try {
       await portfolioApi.updateTransaction(transactionId, payload);
       await reloadPortfolio();
+      await reloadTransactions();
       showToast(`Updated the latest ${form.side.toLowerCase()} for ${form.symbol}.`);
       closeTransactionDrawer();
     } catch (error) {
@@ -2565,6 +3042,14 @@ export function App() {
               sectorAllocation={sectorAllocation}
             />
           </div>
+        ) : activeView === "analytics" ? (
+          <AnalyticsView
+            history={history}
+            holdings={holdings}
+            transactions={ledgerTransactions}
+            summary={summary}
+            usdInrRate={usdInrRate}
+          />
         ) : (
           <HoldingsView
             holdings={holdings}
