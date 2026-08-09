@@ -78,8 +78,11 @@ export function buildPortfolioChartData({
       const previousValue = Number(previous.value);
       const currentValueAtPoint = Number(point.value);
       const cashFlow = Number(point.netInvested) - Number(previous.netInvested);
-      if (previousValue > 0 && Number.isFinite(currentValueAtPoint) && Number.isFinite(cashFlow)) {
-        const dailyFactor = (currentValueAtPoint - cashFlow) / previousValue;
+      const capitalBase = previousValue + cashFlow;
+      if (capitalBase > 0 && Number.isFinite(currentValueAtPoint) && Number.isFinite(cashFlow)) {
+        // Unitize the portfolio so deposits and withdrawals change the number
+        // of units, not the investment return of each unit.
+        const dailyFactor = currentValueAtPoint / capitalBase;
         if (Number.isFinite(dailyFactor) && dailyFactor > 0) {
           cumulativePortfolioFactor *= dailyFactor;
         }

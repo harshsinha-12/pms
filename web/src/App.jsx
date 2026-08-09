@@ -712,7 +712,7 @@ function PortfolioChart({ history, currentValue, currentInvested, currentNetInve
               <span />
             </button>
             <InfoTooltip label="About the Nifty 50 comparison">
-              Compares cash-flow-adjusted portfolio return with Nifty 50 return. Both reset to 0% at the start of the selected period.
+              Compares unitized portfolio return with Nifty 50 return. Added or withdrawn capital does not count as investment performance, and both series reset to 0% at the start of the selected period.
             </InfoTooltip>
           </label>
         </div>

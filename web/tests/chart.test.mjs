@@ -26,6 +26,54 @@ test("builds cash-flow-adjusted portfolio and normalized Nifty returns", () => {
   assert.ok(Math.abs(data[2].relativeReturn - 8) < 1e-9);
 });
 
+test("large contributions change portfolio units instead of creating a return drop", () => {
+  const data = buildPortfolioChartData({
+    history: [
+      {
+        date: "2026-07-26",
+        value: 374.77,
+        invested: 201.59,
+        netInvested: 201.59,
+        benchmark: 24837,
+      },
+      {
+        date: "2026-07-27",
+        value: 13102.71,
+        invested: 13001.79,
+        netInvested: 13001.79,
+        benchmark: 24710,
+      },
+      {
+        date: "2026-07-28",
+        value: 348599.07,
+        invested: 349329.09,
+        netInvested: 349329.09,
+        benchmark: 24680,
+      },
+    ],
+    range: "All",
+    currency: "INR",
+  });
+
+  assert.ok(data[1].displayPortfolioReturn > -1);
+  assert.ok(data[2].displayPortfolioReturn > -2);
+});
+
+test("withdrawals do not erase gains already earned", () => {
+  const data = buildPortfolioChartData({
+    history: [
+      { date: "2026-08-01", value: 100, invested: 100, netInvested: 100, benchmark: 24000 },
+      { date: "2026-08-02", value: 110, invested: 100, netInvested: 100, benchmark: 24100 },
+      { date: "2026-08-03", value: 55, invested: 45, netInvested: 45, benchmark: 24200 },
+    ],
+    range: "All",
+    currency: "INR",
+  });
+
+  assert.ok(Math.abs(data[1].displayPortfolioReturn - 10) < 1e-9);
+  assert.ok(Math.abs(data[2].displayPortfolioReturn - 10) < 1e-9);
+});
+
 test("carries the last valid benchmark through non-trading days", () => {
   const data = buildPortfolioChartData({
     history: [
