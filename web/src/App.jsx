@@ -46,6 +46,7 @@ import {
   YAxis,
 } from "recharts";
 import { portfolioApi } from "./api.js";
+import { assetClassFor } from "./assetClassification.js";
 import {
   buildDemoHistory,
   demoAllocation,
@@ -184,12 +185,6 @@ function explicitUsdInrRate(payload, summary) {
   return null;
 }
 
-function assetClassFor(assetType, currency) {
-  const normalizedType = String(assetType || "").toUpperCase();
-  if (normalizedType.includes("ETF")) return currency === "USD" ? "US ETFs" : "Indian ETFs";
-  return currency === "USD" ? "US Stocks" : "Indian Stocks";
-}
-
 function normalizeHolding(raw, index = 0) {
   const symbol = firstDefined(raw.symbol, raw.ticker, "—");
   const currency = firstDefined(
@@ -209,7 +204,7 @@ function normalizeHolding(raw, index = 0) {
     symbol,
     name: firstDefined(raw.name, raw.long_name, raw.company_name, symbol, "Unknown asset"),
     market,
-    assetClass: assetClassFor(assetType, currency),
+    assetClass: assetClassFor(assetType, currency, symbol),
     assetType: String(assetType || "STOCK").toUpperCase().includes("ETF") ? "ETF" : "STOCK",
     sector: firstDefined(raw.sector, raw.industry_sector, null),
     trailingPe: optionalNumber(firstDefined(raw.trailingPe, raw.trailing_pe)),
@@ -391,7 +386,8 @@ function unpackPortfolio(response) {
   const allocationTotal = Object.values(groupedAllocation).reduce((sum, value) => sum + value, 0);
   const allocationColors = {
     "Indian Stocks": "#11662f",
-    "Indian ETFs": "#4fa45e",
+    "Commodities": "#4fa45e",
+    "US Investments": "#5b63de",
     "US Stocks": "#b5d4b7",
     "US ETFs": "#8ebc98",
   };
@@ -2269,7 +2265,7 @@ function normalizeSearchResult(item) {
     symbol,
     name: firstDefined(item.name, item.long_name, item.short_name, item.symbol, ""),
     market: marketAliases[rawMarket] || rawMarket,
-    assetClass: assetClassFor(assetType, currency),
+    assetClass: assetClassFor(assetType, currency, symbol),
     assetType: String(assetType || "STOCK").toUpperCase().includes("ETF") ? "ETF" : "STOCK",
     currency,
     price: Number(firstDefined(item.price, item.current_price, item.regular_market_price, 0)),
