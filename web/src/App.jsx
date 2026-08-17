@@ -1895,6 +1895,12 @@ function AnalyticsView({
 function MetricsRail({ summary, allocation, sectorAllocation }) {
   const [allocationMode, setAllocationMode] = useState("sector");
   const visibleAllocation = allocationMode === "sector" ? sectorAllocation : allocation;
+  const invested = Number(summary.invested || 0);
+  const unrealizedPercent = invested ? (summary.unrealizedGain / invested) * 100 : 0;
+  const realizedPercent = invested ? (summary.realizedGain / invested) * 100 : 0;
+  const totalPercent = Number.isFinite(summary.allTimeGainPercent)
+    ? summary.allTimeGainPercent
+    : (invested ? (summary.allTimeGain / invested) * 100 : 0);
   return (
     <aside className="metrics-rail" id="analytics-section" aria-label="Portfolio analytics">
       <section className="allocation-block">
@@ -2000,18 +2006,21 @@ function MetricsRail({ summary, allocation, sectorAllocation }) {
             <dt>Unrealized P&amp;L</dt>
             <dd className={summary.unrealizedGain < 0 ? "negative" : summary.unrealizedGain > 0 ? "positive" : "neutral"}>
               {formatSignedMoney(summary.unrealizedGain, "INR")}
+              <small>({formatSignedPercent(unrealizedPercent)})</small>
             </dd>
           </div>
           <div>
             <dt>Realized P&amp;L</dt>
             <dd className={summary.realizedGain < 0 ? "negative" : summary.realizedGain > 0 ? "positive" : "neutral"}>
               {formatSignedMoney(summary.realizedGain, "INR")}
+              <small>({formatSignedPercent(realizedPercent)})</small>
             </dd>
           </div>
           <div className="net-pnl">
             <dt>Total P&amp;L</dt>
             <dd className={summary.allTimeGain < 0 ? "negative" : summary.allTimeGain > 0 ? "positive" : "neutral"}>
               {formatSignedMoney(summary.allTimeGain, "INR")}
+              <small>({formatSignedPercent(totalPercent)})</small>
             </dd>
           </div>
         </dl>

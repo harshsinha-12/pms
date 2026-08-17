@@ -2294,9 +2294,19 @@ tbody tr:hover {
 }
 
 .pnl-breakdown dd {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   margin: 0;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+.pnl-breakdown dd small {
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.72;
 }
 
 .pnl-breakdown .net-pnl {
