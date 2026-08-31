@@ -140,6 +140,26 @@ function valueInInr(holding, unitPrice = holding.currentPrice, usdInrRate = null
   return holding.currency === "USD" ? nativeValue * Number(usdInrRate || 0) : nativeValue;
 }
 
+function holdingDayChange(holding, usdInrRate = null) {
+  const previousClose = Number(holding.previousClose);
+  const hasClose = Number.isFinite(previousClose) && previousClose > 0;
+  const percent = hasClose
+    ? ((Number(holding.currentPrice) - previousClose) / previousClose) * 100
+    : null;
+  const storedPnl = Number(holding.dayPnlInr);
+  let valueInr = Number.isFinite(storedPnl) ? storedPnl : null;
+  if (valueInr == null && hasClose) {
+    const nativeMove = Number(holding.quantity || 0) * (Number(holding.currentPrice) - previousClose);
+    valueInr = holding.currency === "USD"
+      ? nativeMove * Number(usdInrRate || 0)
+      : nativeMove;
+  }
+  return {
+    percent: Number.isFinite(percent) ? percent : null,
+    valueInr: Number.isFinite(valueInr) ? valueInr : null,
+  };
+}
+
 function positiveNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -204,9 +224,9 @@ function normalizeHolding(raw, index = 0) {
     symbol,
     name: firstDefined(raw.name, raw.long_name, raw.company_name, symbol, "Unknown asset"),
     market,
-    assetClass: assetClassFor(assetType, currency, symbol),
-    assetType: String(assetType || "STOCK").toUpperCase().includes("ETF") ? "ETF" : "STOCK",
     sector: firstDefined(raw.sector, raw.industry_sector, null),
+    assetClass: assetClassFor(assetType, currency, symbol, firstDefined(raw.sector, raw.industry_sector, null)),
+    assetType: String(assetType || "STOCK").toUpperCase().includes("ETF") ? "ETF" : "STOCK",
     trailingPe: optionalNumber(firstDefined(raw.trailingPe, raw.trailing_pe)),
     forwardPe: optionalNumber(firstDefined(raw.forwardPe, raw.forward_pe)),
     currency,
@@ -215,11 +235,13 @@ function normalizeHolding(raw, index = 0) {
       firstDefined(raw.averagePrice, raw.average_price, raw.avg_price, raw.purchase_price, 0),
     ),
     currentPrice: Number(firstDefined(raw.currentPrice, raw.current_price, raw.price, 0)),
+    previousClose: optionalNumber(firstDefined(raw.previousClose, raw.previous_close)),
     costBasisInr: Number(firstDefined(raw.costBasisInr, raw.cost_basis_inr, NaN)),
     marketValueNative: Number(firstDefined(raw.marketValueNative, raw.market_value_native, NaN)),
     marketValueInr: Number(firstDefined(raw.marketValueInr, raw.market_value_inr, NaN)),
     unrealizedPnlInr: Number(firstDefined(raw.unrealizedPnlInr, raw.unrealized_pnl_inr, NaN)),
     realizedPnlInr: Number(firstDefined(raw.realizedPnlInr, raw.realized_pnl_inr, 0)),
+    dayPnlInr: optionalNumber(firstDefined(raw.dayPnlInr, raw.day_pnl_inr)),
     quoteIsStale: Boolean(firstDefined(raw.quoteIsStale, raw.quote_is_stale, false)),
     tradedAt: firstDefined(raw.tradedAt, raw.latest_traded_at, raw.traded_at, null),
     color: firstDefined(raw.color, ["#b89252", "#b91f2e", "#5b63de", "#11130f"][index % 4]),
@@ -458,11 +480,13 @@ function unpackPortfolio(response) {
           }))
           .filter((point) => point.date && (point.value || point.invested))
       : [],
-    allocation: Object.entries(groupedAllocation).map(([name, value], index) => ({
-      name,
-      value: allocationTotal ? (value / allocationTotal) * 100 : 0,
-      color: allocationColors[name] || demoAllocation[index % demoAllocation.length]?.color || "#d7dbd2",
-    })),
+    allocation: Object.entries(groupedAllocation)
+      .map(([name, value], index) => ({
+        name,
+        value: allocationTotal ? (value / allocationTotal) * 100 : 0,
+        color: allocationColors[name] || demoAllocation[index % demoAllocation.length]?.color || "#d7dbd2",
+      }))
+      .sort((left, right) => right.value - left.value),
     sectorAllocation,
     lastUpdated: firstDefined(payload.lastUpdated, payload.last_updated, payload.as_of),
     usdInrRate,
@@ -838,6 +862,8 @@ const HOLDING_SORT_DEFAULTS = {
   pe: "descending",
   invested: "descending",
   value: "descending",
+  todayPercent: "descending",
+  todayValue: "descending",
   pnl: "descending",
   allocation: "descending",
 };
@@ -916,6 +942,8 @@ function HoldingsTable({
         case "invested": return invested;
         case "value":
         case "allocation": return current;
+        case "todayPercent": return holdingDayChange(holding, usdInrRate).percent;
+        case "todayValue": return holdingDayChange(holding, usdInrRate).valueInr;
         case "pnl": return Number.isFinite(holding.unrealizedPnlInr)
           ? holding.unrealizedPnlInr
           : current - invested;
@@ -1003,6 +1031,8 @@ function HoldingsTable({
               <SortableHoldingHeader column="quantity" label="Qty" sort={sort} onSort={handleSort} />
               <SortableHoldingHeader column="averagePrice" label="Avg price" sort={sort} onSort={handleSort} />
               <SortableHoldingHeader column="currentPrice" label="Current price" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="todayPercent" label="Today %" sort={sort} onSort={handleSort} />
+              <SortableHoldingHeader column="todayValue" label="Today" sort={sort} onSort={handleSort} />
               <SortableHoldingHeader column="pe" label="P/E T / F" sort={sort} onSort={handleSort} />
               <SortableHoldingHeader column="invested" label="Invested" sort={sort} onSort={handleSort} />
               <SortableHoldingHeader column="value" label="Value" sort={sort} onSort={handleSort} />
@@ -1023,6 +1053,7 @@ function HoldingsTable({
               const allocation = portfolioValue ? (current / portfolioValue) * 100 : 0;
               const nativeInvested = holding.quantity * holding.averagePrice;
               const nativeValue = holding.quantity * holding.currentPrice;
+              const today = holdingDayChange(holding, usdInrRate);
 
               return (
                 <tr key={holding.id}>
@@ -1051,6 +1082,16 @@ function HoldingsTable({
                   <td>{holding.quantity.toLocaleString("en-IN")}</td>
                   <td>{formatMoney(holding.averagePrice, holding.currency, 2)}</td>
                   <td>{formatMoney(holding.currentPrice, holding.currency, 2)}</td>
+                  <td>
+                    <span className={today.percent == null ? "neutral" : today.percent < 0 ? "negative" : today.percent > 0 ? "positive" : "neutral"}>
+                      {today.percent == null ? "—" : formatSignedPercent(today.percent)}
+                    </span>
+                  </td>
+                  <td>
+                    <span className={today.valueInr == null ? "neutral" : today.valueInr < 0 ? "negative" : today.valueInr > 0 ? "positive" : "neutral"}>
+                      {today.valueInr == null ? "—" : formatSignedMoney(today.valueInr, "INR")}
+                    </span>
+                  </td>
                   <td>
                     <div className="value-stack">
                       <span>{holding.trailingPe ? `${holding.trailingPe.toFixed(1)}x` : "—"}</span>
@@ -2274,7 +2315,7 @@ function normalizeSearchResult(item) {
     symbol,
     name: firstDefined(item.name, item.long_name, item.short_name, item.symbol, ""),
     market: marketAliases[rawMarket] || rawMarket,
-    assetClass: assetClassFor(assetType, currency, symbol),
+    assetClass: assetClassFor(assetType, currency, symbol, firstDefined(item.sector, "")),
     assetType: String(assetType || "STOCK").toUpperCase().includes("ETF") ? "ETF" : "STOCK",
     currency,
     price: Number(firstDefined(item.price, item.current_price, item.regular_market_price, 0)),

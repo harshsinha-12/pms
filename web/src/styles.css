@@ -790,7 +790,7 @@ input:focus-visible {
 
 table {
   width: 100%;
-  min-width: 944px;
+  min-width: 1120px;
   border-collapse: collapse;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
