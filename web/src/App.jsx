@@ -46,7 +46,7 @@ import {
   YAxis,
 } from "recharts";
 import { portfolioApi } from "./api.js";
-import { assetClassFor } from "./assetClassification.js";
+import { assetClassFor, buildAssetAllocationSlices } from "./assetClassification.js";
 import {
   buildDemoHistory,
   demoAllocation,
@@ -430,6 +430,11 @@ function unpackPortfolio(response) {
         value: allocationTotal ? (value / allocationTotal) * 100 : 0,
         color: sectorColors[index % sectorColors.length],
       }));
+  const assetAllocationGroups = buildAssetAllocationSlices(
+    groupedAllocation,
+    allocationTotal,
+    sectorAllocation,
+  );
 
   return {
     holdings: normalizedHoldings,
@@ -480,7 +485,8 @@ function unpackPortfolio(response) {
           }))
           .filter((point) => point.date && (point.value || point.invested))
       : [],
-    allocation: Object.entries(groupedAllocation)
+    allocation: Object.entries(assetAllocationGroups)
+      .filter(([, value]) => Number(value) > 0)
       .map(([name, value], index) => ({
         name,
         value: allocationTotal ? (value / allocationTotal) * 100 : 0,
